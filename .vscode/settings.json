@@ -1,0 +1,33 @@
+{
+    "flake8.args": [
+      "--indent-size=2",
+      "--ignore=E111, E126, E121, E114, E402, E501, W503"
+    ],
+    "autopep8.args": [
+      "--indent-size=2",
+      "--ignore=E111, E121, E114, E402, E501"
+    ],
+    "[python]": {
+      "editor.tabSize": 2, // インデントレベルは「2」
+      "editor.defaultFormatter": "ms-python.autopep8",
+      "editor.formatOnSave": true, // 保存時に自動整形を行う
+      "editor.formatOnPaste": false, // ペースト時に自動整形を行わない
+      "editor.formatOnType": false, // 入力後に自動整形を行わない
+    },
+    "files.watcherExclude": {
+      "**/__pycache__/**": true,
+      "**/logs/**": true
+    },
+    "python.testing.unittestArgs": [
+      "-v",
+      "-s",
+      "./test",
+      "-p",
+      "*_test.py"
+    ],
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestArgs": [
+      "tests"
+    ]
+  }
