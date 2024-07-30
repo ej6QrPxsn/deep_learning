@@ -11,7 +11,7 @@ import sys
 
 from models.llama import LLaMA
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import Config
+from config import Config, FlashAttentionConfig
 import torch.nn.utils.rnn as rnn
 from datasets import load_dataset
 import sentencepiece as spm
@@ -38,13 +38,24 @@ def build_vocab(data, vocab_size):
 def pad_batch_fn(batch):
   inputs = []
   labels = []
+  max_len = 0
   for i, item in enumerate(batch):
+    if len(item[0]) > max_len:
+      max_len = len(item[0])
     inputs.append(item[0])
     labels.append(item[1])
 
+  rest_len = max_len % FlashAttentionConfig.Br
+  if rest_len != 0:
+    max_len += FlashAttentionConfig.Br - rest_len
+
   return (
-    rnn.pad_sequence(inputs, batch_first=True, padding_value=Config.pad_id),
-    rnn.pad_sequence(labels, batch_first=True, padding_value=Config.pad_id),
+    rnn.pad_packed_sequence(
+      rnn.pack_sequence(inputs, enforce_sorted=False),
+      batch_first=True, padding_value=Config.pad_id, total_length=max_len)[0],
+    rnn.pad_packed_sequence(
+      rnn.pack_sequence(labels, enforce_sorted=False),
+      batch_first=True, padding_value=Config.pad_id, total_length=max_len)[0]
   )
 
 

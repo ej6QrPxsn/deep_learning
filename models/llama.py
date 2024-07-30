@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from config import Config
+from models.flash_attention import FlashAttention
 
 
 class LLaMA(nn.Module):
@@ -15,29 +16,8 @@ class LLaMA(nn.Module):
     self.linear = nn.Linear(Config.d_model, vocab_size)
 
   def forward(self, x):
-    lookahead_mask = self._create_masks(x)
-    dec_out = self.decoder(x, lookahead_mask)
+    dec_out = self.decoder(x)
     return self.linear(dec_out)
-
-  def _create_masks(self, x):
-    dec_padding_mask = self._get_padding_mask(x)
-    lookahead_mask = self._get_lookahead_mask_mask(x)
-
-    return lookahead_mask + dec_padding_mask
-
-  def _get_lookahead_mask_mask(self, x):
-    batch, len = x.shape[0], x.shape[1]
-    mask = torch.ones(batch, Config.num_head, len, len).tril().to(self.device)
-    return torch.where(mask == 1, 0, torch.tensor(-float('inf')).to(self.device))
-
-  def _get_padding_mask(self, x):
-    batch, len = x.shape[0], x.shape[1]
-    padding_mask = torch.empty(batch, Config.num_head, 1, len, dtype=bool).to(self.device)
-    for i in range(batch):
-      for j in range(len):
-        # 要素がすべてpaddingならtrue、そうでないならfalse
-        padding_mask[i, :, :, j] = torch.all(x[i, j] == Config.pad_id)
-    return torch.where(padding_mask == 1, torch.tensor(-float('inf')).to(self.device), padding_mask)
 
 
 class Embedding(nn.Module):
@@ -62,9 +42,9 @@ class Decoder(nn.Module):
     self.layers = nn.Sequential(*[DecoderLayer(device) for _ in range(Config.num_layer)])
     self.rms_norm = RMSNorm(Config.d_model, device).to(device)
 
-  def forward(self, x, lookahead_mask):
+  def forward(self, x):
     embedd = self.embedding(x)
-    out1, lookahead_mask = self.layers((embedd, lookahead_mask))
+    out1 = self.layers(embedd)
     out2 = self.rms_norm(out1)
     return out2
 
@@ -83,19 +63,19 @@ class DecoderLayer(nn.Module):
     self.rope = Rope(device)
 
   def forward(self, input):
-    x, lookahead_mask = input
+    x = input
 
     rope_x = self.rope(x)
 
     norm_x1 = self.rms_norm1(rope_x)
-    attn_out = self.attention(norm_x1, lookahead_mask)
+    attn_out = self.attention(norm_x1)
     out1 = self.dropout1(attn_out + rope_x)
 
     norm_x2 = self.rms_norm2(out1)
     ffn_out = self.ffn(norm_x2)
     out2 = self.dropout2(ffn_out + out1)
 
-    return (out2, lookahead_mask)
+    return out2
 
 
 class SelfAttention(nn.Module):
@@ -109,34 +89,25 @@ class SelfAttention(nn.Module):
     self.W_V = nn.Linear(Config.d_model, Config.d_model).to(device)
     self.W_O = nn.Linear(Config.d_model, Config.d_model).to(device)
 
-  def forward(self, x, mask):
+    self.flash_attention = FlashAttention.apply
+
+  def forward(self, x):
+    batch, len, dim = x.shape
     q = self._split_head(self.W_Q(x))
     k = self._split_head(self.W_K(x))
     v = self._split_head(self.W_V(x))
 
-    attention = self._scaled_dot_product_attention(q, k, v, mask)
+    attention = torch.empty_like(q)
 
-    concat_attention = self._concat_head(attention)
+    for i in range(q.shape[0]):
+      for j in range(q.shape[1]):
+        attention[i, j] = self.flash_attention(q[i, j], k[i, j], v[i, j])
 
-    return self.W_O(concat_attention)
+    return self.W_O(attention.reshape(batch, len, -1))
 
   def _split_head(self, x):
     batch, len = x.shape[0], x.shape[1]
     return x.view(batch, len, Config.num_head, Config.head_dim).transpose(2, 1)
-
-  def _scaled_dot_product_attention(self, q, k, v, mask):
-
-    # batch * num_head * q_len * head_dim, batch * num_head * kv_len * head_dim
-    # batch * num_head * q_len * kv_len
-    qk = q @ k.transpose(-1, -2) / torch.sqrt(torch.tensor(k.shape[-1]))
-
-    # batch * num_head * q_len * kv_len, batch * num_head * kv_len * kv_len
-    # batch * num_head * q_len * kv_len
-    return F.softmax(qk + mask, dim=-1) @ v
-
-  def _concat_head(self, x):
-    batch, len = x.shape[0], x.shape[2]
-    return x.transpose(2, 1).reshape(batch, len, -1)
 
 
 class FeedForwardNetworks(nn.Module):

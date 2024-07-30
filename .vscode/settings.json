@@ -1,7 +1,7 @@
 {
     "flake8.args": [
       "--indent-size=2",
-      "--ignore=E111, E126, E121, E114, E402, E501, W503"
+      "--ignore=E111, E126, E121, E114, E402, E501, W503, E741"
     ],
     "autopep8.args": [
       "--indent-size=2",
@@ -29,5 +29,8 @@
     "python.testing.unittestEnabled": false,
     "python.testing.pytestArgs": [
       "tests"
-    ]
+    ],
+    "files.associations": {
+      "random": "cpp"
+    }
   }
