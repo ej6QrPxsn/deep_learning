@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from config import Config
-from models.flash_attention import FlashAttention
+from models.flash_attention_function import FlashAttentionFunction
 
 
 class LLaMA(nn.Module):
@@ -89,7 +89,7 @@ class SelfAttention(nn.Module):
     self.W_V = nn.Linear(Config.d_model, Config.d_model).to(device)
     self.W_O = nn.Linear(Config.d_model, Config.d_model).to(device)
 
-    self.flash_attention = FlashAttention.apply
+    self.flash_attention = FlashAttentionFunction.apply
 
   def forward(self, x):
     batch, len, dim = x.shape
@@ -97,11 +97,7 @@ class SelfAttention(nn.Module):
     k = self._split_head(self.W_K(x))
     v = self._split_head(self.W_V(x))
 
-    attention = torch.empty_like(q)
-
-    for i in range(q.shape[0]):
-      for j in range(q.shape[1]):
-        attention[i, j] = self.flash_attention(q[i, j], k[i, j], v[i, j])
+    attention = self.flash_attention(q, k, v)
 
     return self.W_O(attention.reshape(batch, len, -1))
 

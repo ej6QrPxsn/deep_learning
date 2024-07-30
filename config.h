@@ -1,5 +1,4 @@
 #include<string>
-using namespace std;
 
 struct Config {
 public:
@@ -21,8 +20,8 @@ public:
 	static constexpr  float dropout = 0.1;
 	static constexpr  float label_smoothing = 0.1;
 	static constexpr  float grad_clip = 1.0;
-	inline static const string model_path = "model.pt";
+	inline static const std::string model_path = "model.pt";
 	static const int sram_size = 128 * 1024;
-	static const int Bc = sram_size / (4 * head_dim);
-	static const int Br = min(sram_size / (4 * head_dim), head_dim);
+	static const int Bc = 32;
+	static const int Br = 32;
 };

@@ -1,6 +1,17 @@
-from setuptools import setup, Extension
-from torch.utils import cpp_extension
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-setup(name='flash_attention_cpp',
-      ext_modules=[cpp_extension.CppExtension('flash_attention_cpp', ['flash_attention.cpp'])],
-      cmdclass={'build_ext': cpp_extension.BuildExtension})
+setup(
+    name='flash_attention',
+    ext_modules=[
+        CUDAExtension('flash_attention', [
+            'flash_attention.cpp',
+            'flash_attention_kernel.cu',
+        ],
+            extra_compile_args=['-std=c++17']
+        )
+    ],
+    version="2.0.1",
+    cmdclass={
+        'build_ext': BuildExtension
+    })

@@ -14,6 +14,12 @@
       "editor.formatOnPaste": false, // ペースト時に自動整形を行わない
       "editor.formatOnType": false, // 入力後に自動整形を行わない
     },
+    "[c]": {
+      "editor.defaultFormatter": "ms-vscode.cpptools",
+      "editor.formatOnSave": true, // 保存時に自動整形を行う
+      "editor.formatOnPaste": false, // ペースト時に自動整形を行わない
+      "editor.formatOnType": false, // 入力後に自動整形を行わない
+    },
     "files.watcherExclude": {
       "**/__pycache__/**": true,
       "**/logs/**": true
@@ -74,6 +80,14 @@
       "ostream": "cpp",
       "stdexcept": "cpp",
       "streambuf": "cpp",
-      "typeinfo": "cpp"
+      "typeinfo": "cpp",
+      "cstring": "cpp",
+      "chrono": "cpp",
+      "ctime": "cpp",
+      "ratio": "cpp",
+      "semaphore": "cpp",
+      "stop_token": "cpp",
+      "thread": "cpp",
+      "optional": "cpp"
     }
   }

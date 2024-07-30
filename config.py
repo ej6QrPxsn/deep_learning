@@ -10,7 +10,7 @@ def load_config():
     line_list = f.readlines()
 
   for line in line_list:
-    line = line.strip().replace(";", "").replace("\n", "")
+    line = line.strip().replace(";", "").replace("std::", "").replace("\n", "")
     if line.startswith("static"):
       split = line.split(maxsplit=3)
       if len(split) >= 4:
