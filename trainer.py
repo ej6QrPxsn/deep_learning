@@ -4,11 +4,12 @@ import io
 import torch
 
 from torch.utils.tensorboard import SummaryWriter
+from timm.scheduler import CosineLRScheduler
 
 import os
 import sys
 
-from models.transformer import Transformer
+from models.llama import LLaMA
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 import torch.nn.utils.rnn as rnn
@@ -28,6 +29,7 @@ def build_vocab(data, vocab_size):
     model_writer=spm_model,
     vocab_size=vocab_size,
     pad_id=Config.pad_id,
+    user_defined_symbols=['<SEP>']
   )
 
   return spm.SentencePieceProcessor(model_proto=spm_model.getvalue())
@@ -47,38 +49,59 @@ def pad_batch_fn(batch):
 
 
 class CustomDataSet(torch.utils.data.Dataset):
-  def __init__(self, src_vocab, dst_vocab, src_data, dst_data):
+  def __init__(self, vocab, src_data, dst_data):
     super(CustomDataSet, self).__init__()
 
-    self.src_vocab = src_vocab
-    self.dst_vocab = dst_vocab
+    self.vocab = vocab
 
     self.src_lines = src_data
     self.dst_lines = dst_data
+
+    self.sep_id = self.vocab.piece_to_id('<SEP>')
 
   def __len__(self):
     return len(self.src_lines)
 
   def __getitem__(self, index):
     inputs = torch.Tensor(
-      [self.dst_vocab.bos_id()]
-      + self.src_vocab.encode(self.src_lines[index])
-      + [self.dst_vocab.eos_id()]
+      [self.vocab.bos_id()]
+      + self.vocab.encode(self.src_lines[index])
+      + [self.sep_id]
+      + self.vocab.encode(self.dst_lines[index])
     )
 
     outputs = torch.Tensor(
-      [self.dst_vocab.bos_id()]
-      + self.dst_vocab.encode(self.dst_lines[index])
-      + [self.dst_vocab.eos_id()]
+      self.vocab.encode(self.src_lines[index])
+      + [self.sep_id]
+      + self.vocab.encode(self.dst_lines[index])
+      + [self.vocab.eos_id()]
     )
 
     return (inputs, outputs)
 
-  def get_src_tokens(self, indicies):
-    return self.src_vocab.decode(indicies)
 
-  def get_dst_tokens(self, indicies):
-    return self.dst_vocab.decode(indicies)
+class ValidateDataSet(CustomDataSet):
+  def __init__(self, vocab, src_data, dst_data):
+    super(ValidateDataSet, self).__init__(vocab, src_data, dst_data)
+
+  def __len__(self):
+    return super(ValidateDataSet, self).__len__()
+
+  def __getitem__(self, index):
+    inputs = torch.Tensor(
+      [self.vocab.bos_id()]
+      + self.vocab.encode(self.src_lines[index])
+    )
+
+    outputs = torch.Tensor(
+      self.vocab.encode(self.dst_lines[index])
+      + [self.vocab.eos_id()]
+    )
+
+    return (inputs, outputs)
+
+  def get_tokens(self, indicies):
+    return self.vocab.decode(indicies)
 
 
 class TransformerScheduler:
@@ -101,46 +124,32 @@ class Trainer:
     src_dataset = datasets["train"]["en"]
     dst_dataset = datasets["train"]["ja"]
 
-    self.src_vocab_size = 10000
-    self.dst_vocab_size = 10000
-    src_vocab = build_vocab(src_dataset, self.src_vocab_size)
-    self.dst_vocab = build_vocab(dst_dataset, self.dst_vocab_size)
+    self.vocab_size = 20000
+    self.vocab = build_vocab(src_dataset + dst_dataset, self.vocab_size)
 
     train_dataset = CustomDataSet(
-      src_vocab,
-      self.dst_vocab,
+      self.vocab,
       src_dataset,
-      dst_dataset
+      dst_dataset,
     )
 
     self.train_data_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=Config.batch_size, shuffle=True,
         num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
 
-    validation_dataset = CustomDataSet(
-      src_vocab,
-      self.dst_vocab,
+    self.validation_dataset = ValidateDataSet(
+      self.vocab,
       datasets["validation"]["en"],
       datasets["validation"]["ja"]
     )
 
     self.validation_data_loader = torch.utils.data.DataLoader(
-      validation_dataset, batch_size=1, shuffle=True,
+      self.validation_dataset, batch_size=1, shuffle=True,
       num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
-
-    self.test_dataset = CustomDataSet(
-      src_vocab,
-      self.dst_vocab,
-      datasets["test"]["en"],
-      datasets["test"]["ja"]
-    )
-
-    self.test_data_loader = torch.utils.data.DataLoader(
-      self.test_dataset, batch_size=1, shuffle=True, collate_fn=pad_batch_fn)
 
     self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    self.model = Transformer(self.src_vocab_size, self.dst_vocab_size, self.device).to(self.device)
+    self.model = LLaMA(self.vocab_size, self.device).to(self.device)
 
     self.criterion = torch.nn.CrossEntropyLoss(label_smoothing=Config.label_smoothing, reduction="none")
     self.scaler = torch.cuda.amp.GradScaler(enabled=Config.use_amp)
@@ -152,7 +161,7 @@ class Trainer:
 
   def _compute_loss(self, label, output):
     logits = self.criterion(
-      output.view(-1, self.dst_vocab_size),
+      output.view(-1, self.vocab_size),
       label.reshape(-1).to(torch.long).to(self.device))
 
     # パディングマスク
@@ -179,9 +188,12 @@ class Trainer:
     return torch.mean(accuracies)
 
   def train(self):
-    optimizer = torch.optim.Adam(self.model.parameters(),
-                                 lr=Config.adam_lr, betas=Config.adam_betas)
-    scheduler = TransformerScheduler(optimizer)
+    TOTAL_EPOCH = 100
+
+    optimizer = torch.optim.AdamW(self.model.parameters(),
+                                  lr=Config.adam_lr, betas=Config.adam_betas)
+    scheduler = CosineLRScheduler(optimizer, t_initial=TOTAL_EPOCH, lr_min=Config.lr_min,
+                                  warmup_t=1, warmup_lr_init=Config.adam_lr, warmup_prefix=True)
     scaler = torch.GradScaler()
 
     self.model.train()
@@ -199,21 +211,17 @@ class Trainer:
         auto_refresh=False
     ) as progress:
 
-      TOTAL_EPOCH = 30
       task1 = progress.add_task("Epoch", total=TOTAL_EPOCH)
 
       for epoch in range(TOTAL_EPOCH):
         task2 = progress.add_task("Train", total=len(self.train_data_loader))
         for steps, (inputs, labels) in enumerate(self.train_data_loader):
-          decoder_input = labels[:, :-1]
-          output_label = labels[:, 1:]
           with torch.autocast(device_type=self.device, dtype=torch.bfloat16, enabled=Config.use_amp):
             output = self.model(
-              inputs.to(torch.int).to(self.device),
-              decoder_input.to(torch.int).to(self.device))
+              inputs.to(torch.int).to(self.device))
 
-            loss = self._compute_loss(output_label, output)
-            accuracy = self._compute_accuracy(output_label, output)
+            loss = self._compute_loss(labels, output)
+            accuracy = self._compute_accuracy(labels, output)
 
           scaler.scale(loss).backward()
 
@@ -240,36 +248,34 @@ class Trainer:
           progress.update(task2, advance=1)
           progress.refresh()
 
-          scheduler.step()
+        scheduler.step(epoch + 1)
         progress.update(task1, advance=1)
 
   def test(self, steps):
     self.model.eval()
     for inputs, labels in self.validation_data_loader:
-      input = inputs.to(torch.int).to(self.device)
+      id = self.validation_dataset.sep_id
 
-      id = self.dst_vocab.bos_id()
-
-      decode_output = torch.tensor(id).reshape(1, 1).to(self.device)
+      decode_output = torch.tensor(id).reshape(1, 1)
+      decode_output = torch.cat((inputs, decode_output), dim=-1).to(torch.int).to(self.device)
 
       for i in range(labels.shape[1]):
         with torch.no_grad():
           output = self.model(
-            input,
             decode_output
           )
 
         id = torch.argmax(output[:, -1], dim=-1).reshape(1, 1)
-        if id == self.dst_vocab.eos_id():
+        if id == self.vocab.eos_id():
           break
 
         decode_output = torch.cat((decode_output, id), dim=-1)
 
-      input_tokens = self.test_dataset.get_src_tokens(inputs.to(torch.int).tolist()[0])
+      input_tokens = self.validation_dataset.get_tokens(inputs.to(torch.int).tolist()[0])
 
       output2 = torch.softmax(output, dim=2)
       indicies = torch.argmax(output2, dim=-1)[0].to(torch.int).tolist()
-      label_tokens = self.test_dataset.get_dst_tokens(indicies)
+      label_tokens = self.validation_dataset.get_tokens(indicies)
 
       dt_now = datetime.datetime.now()
       d = dt_now.strftime('%Y/%m/%d %H:%M:%S')
