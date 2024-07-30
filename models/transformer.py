@@ -24,11 +24,11 @@ class Transformer(nn.Module):
   def _create_masks(self, x, y):
     enc_padding_mask = self._get_padding_mask(x)
     dec_padding_mask = self._get_padding_mask(y)
-    lookahead_mask = self._get_lookahead_mask_mask(y)
+    lookahead_mask = self._get_lookahead_mask(y)
 
     return enc_padding_mask, enc_padding_mask, lookahead_mask + dec_padding_mask
 
-  def _get_lookahead_mask_mask(self, x):
+  def _get_lookahead_mask(self, x):
     batch, len = x.shape[0], x.shape[1]
     mask = torch.ones(batch, Config.num_head, len, len).tril().to(self.device)
     return torch.where(mask == 1, 0, torch.tensor(-float('inf')).to(self.device))
