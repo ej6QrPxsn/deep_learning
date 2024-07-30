@@ -9,14 +9,18 @@ from models.llama import SelfAttention
 device = "cuda" if torch.cuda.is_available() else "cpu"
 self_attention = SelfAttention(device)
 
-x = torch.randn(Config.batch_size, 100, Config.d_model).to(device)
+x = torch.randn(Config.batch_size, 128, Config.d_model).to(device)
+y = torch.randn(Config.batch_size, 128, Config.d_model).to(device)
 
 forward = 0
 backward = 0
 for _ in range(10):
   start = time.time()
-  loss = self_attention(x)
-  forward += time.time() - start
+  with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=Config.use_amp):
+    out = self_attention(x)
+    forward += time.time() - start
+
+    loss = out.sum()
 
   start = time.time()
   loss.backward()

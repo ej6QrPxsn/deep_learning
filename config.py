@@ -17,6 +17,8 @@ def load_config():
         key, value = split[3].split("=")
         key = key.strip()
         value = value.strip()
+        if key == "use_amp":
+          value = str(bool(value))
         for k, v in constants.items():
           if k in value:
             value = value.replace(k, str(v))
