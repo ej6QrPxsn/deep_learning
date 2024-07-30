@@ -1,11 +1,9 @@
-#include <torch/extension.h>
-#include <vector>
-#include "../../config.h"
+#include "flash_attention.h"
 #include <cuda_runtime.h>
-#include "cublas_v2.h"
 #include <stdio.h>
 #include <iostream>
 #include <limits>
+
 
 // Primary header is compatible with pre-C++11, collective algorithm headers require C++11
 #include <cooperative_groups.h>
@@ -282,7 +280,8 @@ __global__ void flash_attention_cuda_backward_kernel(
 std::vector<torch::Tensor> flash_attention_cuda_forward(
     torch::Tensor Q,
     torch::Tensor K,
-    torch::Tensor V)
+    torch::Tensor V,
+    const int Br, const int Bc)
 {
   // cudaDeviceProp device_prop;
   // cudaGetDeviceProperties(&device_prop, 0);
@@ -309,18 +308,17 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
   int N = Q.size(2);
   const int d = Q.size(3);
 
-  const int Bc = Config::Bc;
-  const int Br = Config::Br;
-
   // 切り上げ除算
   const int Tr = (N + Br - 1) / Br;
   const int Tc = (N + Bc - 1) / Bc;
 
+  const auto dtype = Q.dtype();
+
   auto Q_list = Q.reshape({B, nh, Tr, Br, d}).contiguous();
   auto K_list = K.reshape({B, nh, Tc, Bc, d}).contiguous();
   auto V_list = V.reshape({B, nh, Tc, Bc, d}).contiguous();
-  auto O_list = torch::zeros({B, nh, Tr, Br, d}).to(Q.device());
-  auto l_list = torch::zeros({B, nh, Tr, Br}).to(Q.device());
+  auto O_list = torch::zeros({B, nh, Tr, Br, d}).to(dtype).to(Q.device());
+  auto l_list = torch::zeros({B, nh, Tr, Br}).to(dtype).to(Q.device());
 
   int Q_size = Br;
   int K_size = Bc * d;
@@ -363,15 +361,13 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
     torch::Tensor K,
     torch::Tensor V,
     torch::Tensor O,
-    torch::Tensor L)
+    torch::Tensor L,
+    const int Br, const int Bc)
 {
   auto B = Q.size(0);
   auto nh = Q.size(1);
   auto N = Q.size(2);
   auto d = Q.size(3);
-
-  auto Bc = Config::Bc;
-  auto Br = Config::Br;
 
   // 切り上げ除算
   auto Tr = (N + Br - 1) / Br;

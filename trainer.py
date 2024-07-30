@@ -11,31 +11,32 @@ import sys
 
 from models.llama import LLaMA
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import Config
+import toml
 import torch.nn.utils.rnn as rnn
 from datasets import load_dataset
 import sentencepiece as spm
 from rich.progress import Progress, BarColumn, TextColumn, MofNCompleteColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
+from functools import partial
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-def build_vocab(data, vocab_size):
+def build_vocab(data, vocab_size, pad_id):
   spm_model = io.BytesIO()
   spm.SentencePieceTrainer.train(
     sentence_iterator=iter(data),
     model_writer=spm_model,
     vocab_size=vocab_size,
-    pad_id=Config.pad_id,
+    pad_id=pad_id,
     user_defined_symbols=['<SEP>']
   )
 
   return spm.SentencePieceProcessor(model_proto=spm_model.getvalue())
 
 
-def pad_batch_fn(batch):
+def pad_batch_fn(batch, Br, pad_id):
   inputs = []
   labels = []
   max_len = 0
@@ -45,17 +46,17 @@ def pad_batch_fn(batch):
     inputs.append(item[0])
     labels.append(item[1])
 
-  rest_len = max_len % Config.Br
+  rest_len = max_len % Br
   if rest_len != 0:
-    max_len += Config.Br - rest_len
+    max_len += Br - rest_len
 
   return (
     rnn.pad_packed_sequence(
       rnn.pack_sequence(inputs, enforce_sorted=False),
-      batch_first=True, padding_value=Config.pad_id, total_length=max_len)[0],
+      batch_first=True, padding_value=pad_id, total_length=max_len)[0],
     rnn.pad_packed_sequence(
       rnn.pack_sequence(labels, enforce_sorted=False),
-      batch_first=True, padding_value=Config.pad_id, total_length=max_len)[0]
+      batch_first=True, padding_value=pad_id, total_length=max_len)[0]
   )
 
 
@@ -119,10 +120,13 @@ class TransformerScheduler:
   def __init__(self, optimizer):
     self.optimizer = optimizer
     self.step_num = 0
+    config = toml.load(open('config.toml'))
+    self.d_model = config["model"]["d_model"]
+    self.warmup_steps = config["train"]["warmup_steps"]
 
   def step(self):
     self.step_num += 1
-    lr = Config.d_model ** -0.5 * min(self.step_num ** -0.5, self.step_num * Config.warmup_steps ** -1.5)
+    lr = self.d_model ** -0.5 * min(self.step_num ** -0.5, self.step_num * self.warmup_steps ** -1.5)
 
     for param_group in self.optimizer.param_groups:
       param_group['lr'] = lr
@@ -135,8 +139,12 @@ class Trainer:
     src_dataset = datasets["train"]["en"]
     dst_dataset = datasets["train"]["ja"]
 
+    config = toml.load(open('config.toml'))
+    self.model_params = config["model"]
+    self.train_params = config["train"]
+
     self.vocab_size = 20000
-    self.vocab = build_vocab(src_dataset + dst_dataset, self.vocab_size)
+    self.vocab = build_vocab(src_dataset + dst_dataset, self.vocab_size, self.train_params["pad_id"])
 
     train_dataset = CustomDataSet(
       self.vocab,
@@ -145,8 +153,9 @@ class Trainer:
     )
 
     self.train_data_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=Config.batch_size, shuffle=True,
-        num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
+        train_dataset, batch_size=self.train_params["batch_size"], shuffle=True,
+        num_workers=2, pin_memory=True,
+        collate_fn=partial(pad_batch_fn, Br=self.model_params["Br"], pad_id=self.train_params["pad_id"]))
 
     self.validation_dataset = ValidateDataSet(
       self.vocab,
@@ -156,19 +165,20 @@ class Trainer:
 
     self.validation_data_loader = torch.utils.data.DataLoader(
       self.validation_dataset, batch_size=1, shuffle=True,
-      num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
+      num_workers=2, pin_memory=True,
+        collate_fn=partial(pad_batch_fn, Br=self.model_params["Br"], pad_id=self.train_params["pad_id"]))
 
     self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     self.model = LLaMA(self.vocab_size, self.device).to(self.device)
 
-    self.criterion = torch.nn.CrossEntropyLoss(label_smoothing=Config.label_smoothing, reduction="none")
-    self.scaler = torch.cuda.amp.GradScaler(enabled=Config.use_amp)
+    self.criterion = torch.nn.CrossEntropyLoss(label_smoothing=self.train_params["label_smoothing"], reduction="none")
+    self.scaler = torch.cuda.amp.GradScaler(enabled=self.train_params["use_amp"])
 
     self.writer = SummaryWriter(log_dir="./logs")
 
-    if os.path.exists(Config.model_path):
-      self.model.load_state_dict(torch.load(Config.model_path))
+    if os.path.exists(self.train_params["model_path"]):
+      self.model.load_state_dict(torch.load(self.train_params["model_path"]))
 
   def _compute_loss(self, label, output):
     logits = self.criterion(
@@ -176,7 +186,7 @@ class Trainer:
       label.reshape(-1).to(torch.long).to(self.device))
 
     # パディングマスク
-    mask = torch.where(label == Config.pad_id, 0, 1).to(self.device)
+    mask = torch.where(label == self.train_params["pad_id"], 0, 1).to(self.device)
     logits = logits.reshape(*label.shape)
     logits *= mask
 
@@ -190,7 +200,7 @@ class Trainer:
     accuracies = torch.where(label.to(self.device) == indecies, 1, 0)
 
     # パディングマスク
-    mask = torch.where(label == Config.pad_id, 0, 1).to(self.device)
+    mask = torch.where(label == self.train_params["pad_id"], 0, 1).to(self.device)
     accuracies *= mask
 
     # 長さ合計
@@ -202,9 +212,11 @@ class Trainer:
     TOTAL_EPOCH = 100
 
     optimizer = torch.optim.AdamW(self.model.parameters(),
-                                  lr=Config.adam_lr, betas=(Config.adam_beta1, Config.adam_beta2))
-    scheduler = CosineLRScheduler(optimizer, t_initial=TOTAL_EPOCH, lr_min=Config.lr_min,
-                                  warmup_t=1, warmup_lr_init=Config.adam_lr, warmup_prefix=True)
+                                  lr=self.train_params["adam_lr"],
+                                  betas=(self.train_params["adam_lr"]["adam_beta1"],
+                                         self.train_params["adam_lr"]["adam_beta2"]))
+    scheduler = CosineLRScheduler(optimizer, t_initial=TOTAL_EPOCH, lr_min=self.train_params["adam_lr"]["lr_min"],
+                                  warmup_t=1, warmup_lr_init=self.train_params["adam_lr"]["adam_lr"], warmup_prefix=True)
     scaler = torch.GradScaler()
 
     self.model.train()
@@ -227,7 +239,7 @@ class Trainer:
       for epoch in range(TOTAL_EPOCH):
         task2 = progress.add_task("Train", total=len(self.train_data_loader))
         for steps, (inputs, labels) in enumerate(self.train_data_loader):
-          with torch.autocast(device_type=self.device, dtype=torch.bfloat16, enabled=Config.use_amp):
+          with torch.autocast(device_type=self.device, dtype=torch.bfloat16, enabled=self.train_params["use_amp"]):
             output = self.model(
               inputs.to(torch.int).to(self.device))
 
@@ -236,7 +248,7 @@ class Trainer:
 
           scaler.scale(loss).backward()
 
-          if (steps + 1) % Config.accum_iter == 0 or (steps + 1) == len(self.train_data_loader):
+          if (steps + 1) % self.train_params["accum_iter"] == 0 or (steps + 1) == len(self.train_data_loader):
             scaler.step(optimizer)
             scaler.update()
 
@@ -253,7 +265,7 @@ class Trainer:
 
           if total_steps % 100 == 0:
             self.test(total_steps)
-            torch.save(self.model.state_dict(), Config.model_path)
+            torch.save(self.model.state_dict(), self.train_params["model_path"])
             self.model.train()
 
           progress.update(task2, advance=1)

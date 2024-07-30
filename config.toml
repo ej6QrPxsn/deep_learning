@@ -1,0 +1,25 @@
+[model]
+d_model = 512
+d_ff_scalar = 4
+num_layer = 16
+num_head = 16
+dropout = 0.1
+Bc = 32
+Br = 32
+
+[optimizer]
+adam_lr = 3e-4
+adam_beta1 = 0.9
+adam_beta2 = 0.95
+adam_weight_decay = 0.1
+lr_min = 3e-5
+
+[train]
+label_smoothing = 0.1
+warmup_steps = 2000
+pad_id = 3
+batch_size = 32
+model_path = "model.pt"
+grad_clip = 1.0
+accum_iter = 2
+use_amp = 1

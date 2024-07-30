@@ -88,6 +88,10 @@
       "semaphore": "cpp",
       "stop_token": "cpp",
       "thread": "cpp",
-      "optional": "cpp"
+      "optional": "cpp",
+      "span": "cpp",
+      "format": "cpp",
+      "variant": "cpp",
+      "charconv": "cpp"
     }
   }
