@@ -49,3 +49,5 @@ dist/**
 *.i18n.json
 *.pt
 validation.txt
+build/
+*egg-info/

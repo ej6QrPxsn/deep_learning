@@ -1,36 +1,36 @@
 
-from typing import NamedTuple
+from collections import namedtuple
 
 
-class Config(NamedTuple):
-  use_amp = True
+def load_config():
 
-  pad_id = 3
+  constants = {}
 
-  d_model = 512
-  d_ff = 2048
-  num_layer = 16
+  with open("config.h", "r") as f:
+    line_list = f.readlines()
 
-  num_head = 16
-  head_dim = d_model // num_head
+  for line in line_list:
+    line = line.strip().replace(";", "").replace("\n", "")
+    if line.startswith("static"):
+      split = line.split(maxsplit=3)
+      if len(split) >= 4:
+        key, value = split[3].split("=")
+        key = key.strip()
+        value = value.strip()
+        for k, v in constants.items():
+          if k in value:
+            value = value.replace(k, str(v))
+        eval_value = eval(value)
+        if type(eval_value) is float or type(eval_value) is int:
+          constants[key] = int(eval_value) if eval_value > 1 else eval_value
+        else:
+          constants[key] = eval_value
+    elif line.startswith("inline"):
+      split = line.split(maxsplit=4)
+      key, value = split[4].split("=")
+      constants[key.strip()] = eval(value.strip())
 
-  batch_size = 32
-  accum_iter = 2
-
-  adam_lr = 3e-4
-  adam_betas = (0.9, 0.95)
-  adam_weight_decay = 0.1
-  warmup_steps = 2000
-  lr_min = 3e-5
-
-  dropout = 0.1
-  label_smoothing = 0.1
-  grad_clip = 1.0
-
-  model_path = "model.pt"
+  return namedtuple("Config", sorted(constants))(**constants)
 
 
-class FlashAttentionConfig(NamedTuple):
-  sram_size = 128 * 1024
-  Bc = sram_size // (4 * Config.head_dim)
-  Br = min(sram_size // (4 * Config.head_dim), Config.head_dim)
+Config = load_config()

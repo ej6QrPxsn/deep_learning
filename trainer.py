@@ -11,7 +11,7 @@ import sys
 
 from models.llama import LLaMA
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import Config, FlashAttentionConfig
+from config import Config
 import torch.nn.utils.rnn as rnn
 from datasets import load_dataset
 import sentencepiece as spm
@@ -45,9 +45,9 @@ def pad_batch_fn(batch):
     inputs.append(item[0])
     labels.append(item[1])
 
-  rest_len = max_len % FlashAttentionConfig.Br
+  rest_len = max_len % Config.Br
   if rest_len != 0:
-    max_len += FlashAttentionConfig.Br - rest_len
+    max_len += Config.Br - rest_len
 
   return (
     rnn.pad_packed_sequence(
@@ -202,7 +202,7 @@ class Trainer:
     TOTAL_EPOCH = 100
 
     optimizer = torch.optim.AdamW(self.model.parameters(),
-                                  lr=Config.adam_lr, betas=Config.adam_betas)
+                                  lr=Config.adam_lr, betas=(Config.adam_beta1, Config.adam_beta2))
     scheduler = CosineLRScheduler(optimizer, t_initial=TOTAL_EPOCH, lr_min=Config.lr_min,
                                   warmup_t=1, warmup_lr_init=Config.adam_lr, warmup_prefix=True)
     scaler = torch.GradScaler()

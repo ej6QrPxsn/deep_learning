@@ -1,6 +1,6 @@
 import torch
 
-from config import FlashAttentionConfig
+from config import Config
 
 
 class FlashAttention(torch.autograd.Function):
@@ -8,8 +8,8 @@ class FlashAttention(torch.autograd.Function):
   def forward(ctx, Q, K, V):
     N, d = Q.size()
 
-    Bc = FlashAttentionConfig.Bc
-    Br = FlashAttentionConfig.Br
+    Bc = Config.Bc
+    Br = Config.Br
 
     # 切り上げ除算
     Tr = (N + Br - 1) // Br
@@ -64,8 +64,8 @@ class FlashAttention(torch.autograd.Function):
     Q, K, V, O, L = ctx.saved_tensors
     N, d = Q.size()
 
-    Bc = FlashAttentionConfig.Bc
-    Br = FlashAttentionConfig.Br
+    Bc = Config.Bc
+    Br = Config.Br
 
     # 切り上げ除算
     Tr = (N + Br - 1) // Br
