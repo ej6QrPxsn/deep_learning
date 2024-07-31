@@ -6,7 +6,7 @@ TransformerをPytorchで実装しています。
 
 ### 参照論文
 
-* [Decision Transformer: Outperforming the Atari Human Benchmark](https://arxiv.org/abs/1706.03762)
+* [Attention Is All You Need](https://arxiv.org/pdf/1706.03762)
 
 
 ## 実行
