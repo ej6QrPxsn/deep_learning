@@ -2,13 +2,13 @@
 #include <vector>
 #include "toml.hpp"
 
-
 // CUDA forward declarations
 std::vector<torch::Tensor> flash_attention_cuda_forward(
     torch::Tensor Q,
     torch::Tensor K,
     torch::Tensor V,
-    const int Br, const int Bc);
+    const int Br, const int Bc,
+    torch::Tensor mask);
 
 std::vector<torch::Tensor> flash_attention_cuda_backward(
     torch::Tensor dO,
@@ -29,10 +29,11 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
 
 struct FlashAttention : public torch::autograd::Function<FlashAttention>
 {
-  static torch::autograd::variable_list forward(torch::autograd::AutogradContext *ctx, 
-      torch::Tensor Q,
-      torch::Tensor K,
-      torch::Tensor V)
+  static torch::autograd::variable_list forward(torch::autograd::AutogradContext *ctx,
+                                                torch::Tensor Q,
+                                                torch::Tensor K,
+                                                torch::Tensor V,
+                                                torch::Tensor mask)
   {
 
     CHECK_INPUT(Q);
@@ -43,7 +44,7 @@ struct FlashAttention : public torch::autograd::Function<FlashAttention>
     static const int Br = toml::find<int>(data, "model", "Br");
     static const int Bc = toml::find<int>(data, "model", "Bc");
 
-    auto out = flash_attention_cuda_forward(Q, K, V, Br, Bc);
+    auto out = flash_attention_cuda_forward(Q, K, V, Br, Bc, mask);
 
     // Save data for backward in context
     ctx->saved_data["Q"] = Q;
@@ -55,7 +56,8 @@ struct FlashAttention : public torch::autograd::Function<FlashAttention>
     return {out[0]};
   }
 
-  static torch::autograd::variable_list backward(torch::autograd::AutogradContext *ctx, torch::autograd::variable_list grad_output) {
+  static torch::autograd::variable_list backward(torch::autograd::AutogradContext *ctx, torch::autograd::variable_list grad_output)
+  {
     torch::Tensor dO = grad_output[0];
     auto Q = ctx->saved_data["Q"].toTensor();
     auto K = ctx->saved_data["K"].toTensor();

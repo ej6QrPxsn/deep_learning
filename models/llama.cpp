@@ -42,7 +42,8 @@ TORCH_MODULE(SwiGLU);
 
 struct RopeImpl : torch::nn::Module
 {
-  RopeImpl(torch::Device device) : device(device) {
+  RopeImpl(torch::Device device) : device(device)
+  {
     auto data = toml::parse("config.toml");
     d_model = toml::find<int>(data, "model", "d_model");
   }
@@ -95,7 +96,7 @@ struct SelfAttentionImpl : torch::nn::Module
     W_O = register_module("W_O", torch::nn::Linear(d_model, d_model));
   }
 
-  torch::Tensor forward(torch::Tensor x)
+  torch::Tensor forward(torch::Tensor x, torch::Tensor mask)
   {
     auto batch = x.size(0);
     auto len = x.size(1);
@@ -104,7 +105,7 @@ struct SelfAttentionImpl : torch::nn::Module
     auto k = W_K(x).view({batch, len, num_head, head_dim}).transpose(2, 1).contiguous();
     auto v = W_V(x).view({batch, len, num_head, head_dim}).transpose(2, 1).contiguous();
 
-    auto ret = FlashAttention::apply(q, k, v);
+    auto ret = FlashAttention::apply(q, k, v, mask);
 
     return W_O(ret[0].reshape({batch, len, -1}));
   }
@@ -161,21 +162,21 @@ struct DecoderLayerImpl : torch::nn::Module
     dropout2 = register_module("dropout2", torch::nn::Dropout(dropout));
   }
 
-  torch::Tensor forward(torch::Tensor input)
+  std::array<torch::Tensor, 2> forward(std::array<torch::Tensor, 2> input)
   {
-    auto x = input;
+    auto[x, mask]  = input;
 
     auto rope_x = rope(x);
 
     auto norm_x1 = rms_norm1(rope_x);
-    auto attn_out = attention(norm_x1);
+    auto attn_out = attention(norm_x1, mask);
     auto out1 = dropout1(attn_out + rope_x);
 
     auto norm_x2 = rms_norm2(out1);
     auto ffn_out = ffn(norm_x2);
     auto out2 = dropout2(ffn_out + out1);
 
-    return out2;
+    return {out2, mask};
   }
 
   Rope rope = nullptr;
@@ -198,8 +199,8 @@ struct EmbeddingLayerImpl : torch::nn::Module
     auto dropout_val = toml::find<float>(data, "model", "dropout");
 
     embedding = register_module("embedding", torch::nn::Embedding(
-                                                static_cast<int64_t>(vocab_size),
-                                                d_model));
+                                                 static_cast<int64_t>(vocab_size),
+                                                 d_model));
     dropout = register_module("dropout", torch::nn::Dropout(dropout_val));
   }
 
@@ -218,7 +219,8 @@ TORCH_MODULE(EmbeddingLayer);
 struct DecoderImpl : torch::nn::Module
 {
   DecoderImpl(int vocab_size, torch::Device device)
-      : embedding(register_module("embedding", EmbeddingLayer(vocab_size, device)))
+      : embedding(register_module("embedding", EmbeddingLayer(vocab_size, device))),
+        layers(register_module("layers", torch::nn::Sequential()))
   {
     auto data = toml::parse("config.toml");
     auto d_model = toml::find<int>(data, "model", "d_model");
@@ -226,24 +228,23 @@ struct DecoderImpl : torch::nn::Module
 
     rms_norm = register_module("rms_norm", RMSNorm(d_model, device));
 
-    layers = torch::nn::Sequential();
     for (int i = 0; i < num_layer; i++)
     {
       layers->push_back(DecoderLayer(device));
     }
-    layers = register_module("layers", layers);
   }
 
-  torch::Tensor forward(torch::Tensor x)
+  torch::Tensor forward(torch::Tensor x, torch::Tensor mask)
   {
     auto embedd = embedding(x);
-    auto out1 = layers->forward(embedd);
-    auto out2 = rms_norm(out1);
+    std::array<torch::Tensor, 2> in{embedd, mask};
+    auto out1 = layers->forward<std::array<torch::Tensor, 2>>(in);
+    auto out2 = rms_norm(out1[0]);
     return out2;
   }
   EmbeddingLayer embedding = nullptr;
-  RMSNorm rms_norm = nullptr;
   torch::nn::Sequential layers = nullptr;
+  RMSNorm rms_norm = nullptr;
 };
 TORCH_MODULE(Decoder);
 
@@ -255,17 +256,48 @@ struct LLaMAImpl : torch::nn::Module
   {
     auto data = toml::parse("config.toml");
     auto d_model = toml::find<int>(data, "model", "d_model");
+    Bc = toml::find<int>(data, "model", "Bc");
+    pad_id = toml::find<int>(data, "train", "pad_id");
     linear = register_module("linear", torch::nn::Linear(d_model, vocab_size));
   }
 
   torch::Tensor forward(torch::Tensor x)
   {
-    auto dec_out = decoder(x);
+    auto mask = create_mask(x);
+    auto dec_out = decoder(x, mask);
     return linear(dec_out);
+  }
+
+  torch::Tensor create_mask(torch::Tensor x)
+  {
+    auto padding_mask = get_padding_mask(x);
+    return padding_mask;
+  }
+
+  torch::Tensor get_padding_mask(torch::Tensor x)
+  {
+    auto batch = x.size(0);
+    auto len = x.size(1);
+    auto padding_mask = torch::empty({batch, len}).to(device);
+    auto Tc = len / Bc;
+
+    for (int i = 0; i < batch; i++)
+    {
+      for (int j = 0; j < len; j++)
+      {
+        // 要素がすべてpaddingなら-inf、そうでないなら0
+        padding_mask.index_put_({i, j},
+                                torch::where(torch::all(x.index({i, j}) == pad_id), -INFINITY, 0));
+      }
+    }
+
+    return padding_mask.reshape({batch, Tc, Bc});
   }
 
   torch::Device device;
   Decoder decoder = nullptr;
+  int Bc;
+  int pad_id;
   torch::nn::Linear linear = nullptr;
 };
 TORCH_MODULE(LLaMA);

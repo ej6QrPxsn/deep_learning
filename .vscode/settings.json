@@ -92,6 +92,13 @@
       "span": "cpp",
       "format": "cpp",
       "variant": "cpp",
-      "charconv": "cpp"
+      "charconv": "cpp",
+      "codecvt": "cpp",
+      "forward_list": "cpp",
+      "map": "cpp",
+      "source_location": "cpp",
+      "fstream": "cpp",
+      "iomanip": "cpp",
+      "sstream": "cpp"
     }
   }
