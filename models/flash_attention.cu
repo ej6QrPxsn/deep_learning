@@ -55,14 +55,13 @@ __global__ void flash_attention_cuda_forward_kernel(
 {
   const auto d_idx = threadIdx.x;
 
-  const auto q_ofst = blockIdx.x * gridDim.y * gridDim.z * d +
-                      blockIdx.y * gridDim.z * d;
+  const auto q_ofst = blockIdx.x * gridDim.y * d +
+                      blockIdx.y * d;
 
   const auto kv_ofst = blockIdx.x * Tc * Bc * d;
 
-  const auto lm_ofst = blockIdx.x * gridDim.y * gridDim.z +
-                       blockIdx.y * gridDim.z +
-                       blockIdx.z;
+  const auto lm_ofst = blockIdx.x * gridDim.y +
+                       blockIdx.y;
 
   extern __shared__ float mbm_block[];
   float *Qi = mbm_block;
@@ -166,7 +165,7 @@ __global__ void flash_attention_cuda_backward_kernel(
 
   const auto q_ofst = blockIdx.x * Tr * Br * d;
 
-  const auto kv_ofst = blockIdx.x * gridDim.y * Bc * d +
+  const auto kv_ofst = blockIdx.x * Tc * Bc * d +
                        blockIdx.y * Bc * d;
 
   const auto lm_ofst = blockIdx.x * Tr * Br;
@@ -317,11 +316,11 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
 
   const auto dtype = Q.dtype();
 
-  auto Q_list = Q.reshape({B, nh, Tr, Br, d}).contiguous();
-  auto K_list = K.reshape({B, nh, Tc, Bc, d}).contiguous();
-  auto V_list = V.reshape({B, nh, Tc, Bc, d}).contiguous();
-  auto O_list = torch::zeros({B, nh, Tr, Br, d}).to(dtype).to(Q.device());
-  auto l_list = torch::zeros({B, nh, Tr, Br}).to(dtype).to(Q.device());
+  auto Q_list = Q.reshape({B * nh, Tr, Br, d}).contiguous();
+  auto K_list = K.reshape({B * nh, Tc, Bc, d}).contiguous();
+  auto V_list = V.reshape({B * nh, Tc, Bc, d}).contiguous();
+  auto O_list = torch::zeros({B * nh, Tr, Br, d}).to(dtype).to(Q.device());
+  auto l_list = torch::zeros({B * nh, Tr, Br}).to(dtype).to(Q.device());
 
   int Q_size = Br;
   int K_size = Bc * d;
@@ -378,17 +377,17 @@ torch::autograd::variable_list flash_attention_cuda_backward(
   auto Tr = (N + Br - 1) / Br;
   auto Tc = (N + Bc - 1) / Bc;
 
-  auto dO_list = dO.reshape({B, nh, Tr, Br, d});
-  auto Q_list = Q.reshape({B, nh, Tr, Br, d}).contiguous();
-  auto K_list = K.reshape({B, nh, Tc, Bc, d}).contiguous();
-  auto V_list = V.reshape({B, nh, Tc, Bc, d}).contiguous();
-  auto L_list = torch::zeros({B, nh, Tr, Br}).to(Q.device());
+  auto dO_list = dO.reshape({B * nh, Tr, Br, d});
+  auto Q_list = Q.reshape({B * nh, Tr, Br, d}).contiguous();
+  auto K_list = K.reshape({B * nh, Tc, Bc, d}).contiguous();
+  auto V_list = V.reshape({B * nh, Tc, Bc, d}).contiguous();
+  auto L_list = torch::zeros({B * nh, Tr, Br}).to(Q.device());
   auto dQ_list = torch::zeros_like(Q_list);
   auto dK_list = torch::zeros_like(K_list);
   auto dV_list = torch::zeros_like(V_list);
 
   auto D = torch::sum(dO * O, /* d= */ 3);
-  auto D_list = D.reshape({B, nh, Tr, Br});
+  auto D_list = D.reshape({B * nh, Tr, Br});
 
   int Q_size = d;
   int K_size = Bc * d;
