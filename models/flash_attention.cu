@@ -51,14 +51,14 @@ __global__ void flash_attention_cuda_forward_kernel(
     float *O_list,
     float *l_list,
     const float *mask_list,
-    const int Tr, const int Tc, const int Br, const int Bc, const int d)
+    const int Tr, const int Tc, const int Br, const int Bc, const int hd)
 {
   const auto d_idx = threadIdx.x;
 
-  const auto q_ofst = blockIdx.x * gridDim.y * d +
-                      blockIdx.y * d;
+  const auto q_ofst = blockIdx.x * gridDim.y * hd +
+                      blockIdx.y * hd;
 
-  const auto kv_ofst = blockIdx.x * Tc * Bc * d;
+  const auto kv_ofst = blockIdx.x * Tc * Bc * hd;
 
   const auto lm_ofst = blockIdx.x * gridDim.y +
                        blockIdx.y;
@@ -66,14 +66,14 @@ __global__ void flash_attention_cuda_forward_kernel(
   extern __shared__ float mbm_block[];
   float *Qi = mbm_block;
   float *Kj = Qi + Br;
-  float *Vj = Kj + Bc + d;
+  float *Vj = Kj + Bc + hd;
   float *Sij = Vj + Bc;
   float *Oij = Sij + Bc;
   float *l = Oij + Br;
   float *m = l + Br;
   float *prev_m = l + Br;
   float *temp = prev_m + Br;
-  float *mask = temp + d;
+  float *mask = temp + hd;
 
   cg::thread_block g = cg::this_thread_block();
 
@@ -81,22 +81,19 @@ __global__ void flash_attention_cuda_forward_kernel(
 
   for (int br_idx = 0; br_idx < Br; br_idx++)
   {
-    Qi[br_idx] = Q_list[q_ofst + br_idx * d + d_idx];
+    Qi[br_idx] = Q_list[q_ofst + br_idx * hd + d_idx];
     Oij[br_idx] = 0;
     l[br_idx] = 0;
     prev_m[br_idx] = -INFINITY;
   }
-
-  // d次元の完了を待つ
-  g.sync();
 
   for (int j = 0; j < Tc; j++)
   {
     // Load Kj to SRAM
     for (int bc_idx = 0; bc_idx < Bc; bc_idx++)
     {
-      Kj[bc_idx * d + d_idx] = K_list[kv_ofst + j * Bc * d + bc_idx * d + d_idx];
-      Vj[bc_idx * d + d_idx] = V_list[kv_ofst + j * Bc * d + bc_idx * d + d_idx];
+      Kj[bc_idx * hd + d_idx] = K_list[kv_ofst + j * Bc * hd + bc_idx * hd + d_idx];
+      Vj[bc_idx * hd + d_idx] = V_list[kv_ofst + j * Bc * hd + bc_idx * hd + d_idx];
       mask[bc_idx] = mask_list[blockIdx.x * Tc * Bc + j * Bc + bc_idx];
     }
 
@@ -141,7 +138,7 @@ __global__ void flash_attention_cuda_forward_kernel(
   for (int br_idx = 0; br_idx < Br; br_idx++)
   {
     // O𝑖 = diag(ℓ(𝑇𝑐 )𝑖 )−1O(𝑇𝑐 )
-    O_list[q_ofst + br_idx * d + d_idx] = (1 / l[br_idx]) * Oij[br_idx];
+    O_list[q_ofst + br_idx * hd + d_idx] = (1 / l[br_idx]) * Oij[br_idx];
 
     // 𝐿𝑖 = 𝑚(𝑇𝑐 )𝑖 + log(ℓ(𝑇𝑐 )𝑖 )
     l_list[lm_ofst + br_idx] = m[br_idx] + logf(l[br_idx]);
@@ -158,15 +155,15 @@ __global__ void flash_attention_cuda_backward_kernel(
     float *dQ_list,
     float *dK_list,
     float *dV_list,
-    const int Tr, const int Tc, const int Br, const int Bc, const int d)
+    const int Tr, const int Tc, const int Br, const int Bc, const int hd)
 
 {
   const auto d_idx = threadIdx.x;
 
-  const auto q_ofst = blockIdx.x * Tr * Br * d;
+  const auto q_ofst = blockIdx.x * Tr * Br * hd;
 
-  const auto kv_ofst = blockIdx.x * Tc * Bc * d +
-                       blockIdx.y * Bc * d;
+  const auto kv_ofst = blockIdx.x * Tc * Bc * hd +
+                       blockIdx.y * Bc * hd;
 
   const auto lm_ofst = blockIdx.x * Tr * Br;
 
@@ -187,14 +184,11 @@ __global__ void flash_attention_cuda_backward_kernel(
   for (int bc_idx = 0; bc_idx < Bc; bc_idx++)
   {
     // Load Kj to SRAM
-    Kj[bc_idx * d + d_idx] = K_list[kv_ofst + bc_idx * d + d_idx];
+    Kj[bc_idx * hd + d_idx] = K_list[kv_ofst + bc_idx * hd + d_idx];
 
     // Load VjT to SRAM
-    Vj[bc_idx * d + d_idx] = V_list[kv_ofst + bc_idx * d + d_idx];
+    Vj[bc_idx * hd + d_idx] = V_list[kv_ofst + bc_idx * hd + d_idx];
   }
-
-  // d次元の完了を待つ
-  g.sync();
 
   auto Pij = Sij;
   auto dSij = dPij;
@@ -204,10 +198,10 @@ __global__ void flash_attention_cuda_backward_kernel(
     for (int br_idx = 0; br_idx < Br; br_idx++)
     {
       // Load Qi to SRAM
-      Qi[br_idx] = Q_list[q_ofst + i * Br + br_idx * d + d_idx];
+      Qi[br_idx] = Q_list[q_ofst + i * Br + br_idx * hd + d_idx];
 
       // Load dOi to SRAM
-      dOi[br_idx] = dO_list[q_ofst + i * Br + br_idx * d + d_idx];
+      dOi[br_idx] = dO_list[q_ofst + i * Br + br_idx * hd + d_idx];
 
       auto Li = L_list[lm_ofst + i * Br + br_idx];
 
@@ -252,9 +246,9 @@ __global__ void flash_attention_cuda_backward_kernel(
 
         // Load dQ𝑖 from HBM to SRAM, then on chip, update dQ𝑖 ← dQ𝑖 + dS( 𝑗 )𝑖 K𝑗 ∈ R𝐵𝑟 ×𝑑, and write back to HBM.
         // Bc次元足し合わせ
-        dQi[br_idx] += dSij[br_idx * Bc + bc_idx] * Kj[bc_idx * d + d_idx];
+        dQi[br_idx] += dSij[br_idx * Bc + bc_idx] * Kj[bc_idx * hd + d_idx];
       }
-      dQ_list[q_ofst + i * Br + br_idx * d + d_idx] = dOi[br_idx];
+      dQ_list[q_ofst + i * Br + br_idx * hd + d_idx] = dOi[br_idx];
     }
 
     for (int bc_idx = 0; bc_idx < Bc; bc_idx++)
@@ -273,8 +267,8 @@ __global__ void flash_attention_cuda_backward_kernel(
   for (int bc_idx = 0; bc_idx < Bc; bc_idx++)
   {
     // Write dK𝑗 , dV𝑗 to HBM.
-    dK_list[kv_ofst + bc_idx * d + d_idx] = dKj[bc_idx];
-    dV_list[kv_ofst + bc_idx * d + d_idx] = dVj[bc_idx];
+    dK_list[kv_ofst + bc_idx * hd + d_idx] = dKj[bc_idx];
+    dV_list[kv_ofst + bc_idx * hd + d_idx] = dVj[bc_idx];
   }
 }
 
@@ -308,7 +302,7 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
   int B = Q.size(0);
   int nh = Q.size(1);
   int N = Q.size(2);
-  const int d = Q.size(3);
+  const int hd = Q.size(3);
 
   // 切り上げ除算
   const int Tr = (N + Br - 1) / Br;
@@ -316,28 +310,28 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
 
   const auto dtype = Q.dtype();
 
-  auto Q_list = Q.reshape({B * nh, Tr, Br, d}).contiguous();
-  auto K_list = K.reshape({B * nh, Tc, Bc, d}).contiguous();
-  auto V_list = V.reshape({B * nh, Tc, Bc, d}).contiguous();
-  auto O_list = torch::zeros({B * nh, Tr, Br, d}).to(dtype).to(Q.device());
+  auto Q_list = Q.reshape({B * nh, Tr, Br, hd}).contiguous();
+  auto K_list = K.reshape({B * nh, Tc, Bc, hd}).contiguous();
+  auto V_list = V.reshape({B * nh, Tc, Bc, hd}).contiguous();
+  auto O_list = torch::zeros({B * nh, Tr, Br, hd}).to(dtype).to(Q.device());
   auto l_list = torch::zeros({B * nh, Tr, Br}).to(dtype).to(Q.device());
 
   int Q_size = Br;
-  int K_size = Bc * d;
+  int K_size = Bc * hd;
   int V_size = Bc;
   int S_size = Bc;
   int O_size = Br;
   int l_size = Br;
   int m_size = Br;
   int prev_m_size = Br;
-  int temp_size = d;
+  int temp_size = hd;
   int mask_size = Bc;
 
   int l1_size = Q_size + K_size + V_size + S_size + O_size + l_size + m_size + prev_m_size + temp_size + mask_size;
   const int mem_size = l1_size * Q.element_size();
 
   dim3 grid(B * nh, Tr);
-  dim3 block(d);
+  dim3 block(hd);
 
   flash_attention_cuda_forward_kernel<<<grid, block, mem_size>>>(
       Q.data_ptr<float>(),
@@ -346,7 +340,7 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
       O_list.data_ptr<float>(),
       l_list.data_ptr<float>(),
       mask.data_ptr<float>(),
-      Tr, Tc, Br, Bc, d);
+      Tr, Tc, Br, Bc, hd);
 
   cudaError_t err = cudaPeekAtLastError();
   if (err != cudaSuccess)
@@ -355,7 +349,7 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
   }
 
   return {
-      O_list.reshape({B, nh, N, d}),
+      O_list.reshape({B, nh, N, hd}),
       l_list.reshape({B, nh, N})};
 }
 
@@ -371,32 +365,32 @@ torch::autograd::variable_list flash_attention_cuda_backward(
   auto B = Q.size(0);
   auto nh = Q.size(1);
   auto N = Q.size(2);
-  auto d = Q.size(3);
+  auto hd = Q.size(3);
 
   // 切り上げ除算
   auto Tr = (N + Br - 1) / Br;
   auto Tc = (N + Bc - 1) / Bc;
 
-  auto dO_list = dO.reshape({B * nh, Tr, Br, d});
-  auto Q_list = Q.reshape({B * nh, Tr, Br, d}).contiguous();
-  auto K_list = K.reshape({B * nh, Tc, Bc, d}).contiguous();
-  auto V_list = V.reshape({B * nh, Tc, Bc, d}).contiguous();
+  auto dO_list = dO.reshape({B * nh, Tr, Br, hd});
+  auto Q_list = Q.reshape({B * nh, Tr, Br, hd}).contiguous();
+  auto K_list = K.reshape({B * nh, Tc, Bc, hd}).contiguous();
+  auto V_list = V.reshape({B * nh, Tc, Bc, hd}).contiguous();
   auto L_list = torch::zeros({B * nh, Tr, Br}).to(Q.device());
   auto dQ_list = torch::zeros_like(Q_list);
   auto dK_list = torch::zeros_like(K_list);
   auto dV_list = torch::zeros_like(V_list);
 
-  auto D = torch::sum(dO * O, /* d= */ 3);
+  auto D = torch::sum(dO * O, /* hd= */ 3);
   auto D_list = D.reshape({B * nh, Tr, Br});
 
-  int Q_size = d;
-  int K_size = Bc * d;
-  int V_size = Bc * d;
+  int Q_size = hd;
+  int K_size = Bc * hd;
+  int V_size = Bc * hd;
   int S_size = Bc;
-  int O_size = d;
-  int dQ_size = d;
-  int dK_size = Bc * d;
-  int dV_size = Bc * d;
+  int O_size = hd;
+  int dQ_size = hd;
+  int dK_size = Bc * hd;
+  int dV_size = Bc * hd;
   int r_size = Br;
 
   int l1_size = Q_size + K_size + V_size + S_size + O_size +
@@ -404,7 +398,7 @@ torch::autograd::variable_list flash_attention_cuda_backward(
   const int mem_size = l1_size * Q.element_size();
 
   dim3 grid(B * nh, Tc);
-  dim3 block(d);
+  dim3 block(hd);
 
   flash_attention_cuda_backward_kernel<<<grid, block, mem_size>>>(
       dO_list.data_ptr<float>(),
@@ -416,7 +410,7 @@ torch::autograd::variable_list flash_attention_cuda_backward(
       dQ_list.data_ptr<float>(),
       dK_list.data_ptr<float>(),
       dV_list.data_ptr<float>(),
-      Tr, Tc, Br, Bc, d);
+      Tr, Tc, Br, Bc, hd);
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess)
@@ -427,9 +421,9 @@ torch::autograd::variable_list flash_attention_cuda_backward(
   torch::Tensor undef;
   torch::autograd::variable_list grad_inputs =
       {
-          dQ_list.reshape({B, nh, N, d}),
-          dK_list.reshape({B, nh, N, d}),
-          dV_list.reshape({B, nh, N, d}),
+          dQ_list.reshape({B, nh, N, hd}),
+          dK_list.reshape({B, nh, N, hd}),
+          dV_list.reshape({B, nh, N, hd}),
           undef};
   return grad_inputs;
 }
