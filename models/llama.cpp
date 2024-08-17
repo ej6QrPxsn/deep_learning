@@ -257,6 +257,7 @@ struct LLaMAImpl : torch::nn::Module
     auto data = toml::parse("config.toml");
     auto d_model = toml::find<int>(data, "model", "d_model");
     Bc = toml::find<int>(data, "model", "Bc");
+    num_head = toml::find<int>(data, "model", "num_head");
     pad_id = toml::find<int>(data, "train", "pad_id");
     linear = register_module("linear", torch::nn::Linear(d_model, vocab_size));
   }
@@ -278,7 +279,8 @@ struct LLaMAImpl : torch::nn::Module
   {
     auto batch = x.size(0);
     auto len = x.size(1);
-    auto padding_mask = torch::empty({batch, len}).to(device);
+    auto padding_mask = torch::empty({batch, num_head, len}).to(device);
+
     auto Tc = len / Bc;
 
     for (int i = 0; i < batch; i++)
@@ -286,17 +288,18 @@ struct LLaMAImpl : torch::nn::Module
       for (int j = 0; j < len; j++)
       {
         // 要素がすべてpaddingなら-inf、そうでないなら0
-        padding_mask.index_put_({i, j},
+        padding_mask.index_put_({i, Slice(), j},
                                 torch::where(torch::all(x.index({i, j}) == pad_id), -INFINITY, 0));
       }
     }
 
-    return padding_mask.reshape({batch, Tc, Bc});
+    return padding_mask.reshape({batch, num_head, Tc, Bc});
   }
 
   torch::Device device;
   Decoder decoder = nullptr;
   int Bc;
+  int num_head;
   int pad_id;
   torch::nn::Linear linear = nullptr;
 };

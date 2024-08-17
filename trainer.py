@@ -9,7 +9,7 @@ from timm.scheduler import CosineLRScheduler
 import os
 import sys
 
-from models.llama import LLaMA
+from llama import LLaMA
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import toml
 import torch.nn.utils.rnn as rnn
@@ -142,6 +142,7 @@ class Trainer:
     config = toml.load(open('config.toml'))
     self.model_params = config["model"]
     self.train_params = config["train"]
+    self.optimizer_params = config["optimizer"]
 
     self.vocab_size = 20000
     self.vocab = build_vocab(src_dataset + dst_dataset, self.vocab_size, self.train_params["pad_id"])
@@ -170,7 +171,8 @@ class Trainer:
 
     self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    self.model = LLaMA(self.vocab_size, self.device).to(self.device)
+    self.model = LLaMA(self.vocab_size, torch.device(self.device))
+    self.model.to(torch.device(self.device))
 
     self.criterion = torch.nn.CrossEntropyLoss(label_smoothing=self.train_params["label_smoothing"], reduction="none")
     self.scaler = torch.cuda.amp.GradScaler(enabled=self.train_params["use_amp"])
@@ -212,11 +214,11 @@ class Trainer:
     TOTAL_EPOCH = 100
 
     optimizer = torch.optim.AdamW(self.model.parameters(),
-                                  lr=self.train_params["adam_lr"],
-                                  betas=(self.train_params["adam_lr"]["adam_beta1"],
-                                         self.train_params["adam_lr"]["adam_beta2"]))
-    scheduler = CosineLRScheduler(optimizer, t_initial=TOTAL_EPOCH, lr_min=self.train_params["adam_lr"]["lr_min"],
-                                  warmup_t=1, warmup_lr_init=self.train_params["adam_lr"]["adam_lr"], warmup_prefix=True)
+                                  lr=self.optimizer_params["adam_lr"],
+                                  betas=(self.optimizer_params["adam_beta1"],
+                                         self.optimizer_params["adam_beta2"]))
+    scheduler = CosineLRScheduler(optimizer, t_initial=TOTAL_EPOCH, lr_min=self.optimizer_params["lr_min"],
+                                  warmup_t=1, warmup_lr_init=self.optimizer_params["adam_lr"], warmup_prefix=True)
     scaler = torch.GradScaler()
 
     self.model.train()
@@ -239,12 +241,12 @@ class Trainer:
       for epoch in range(TOTAL_EPOCH):
         task2 = progress.add_task("Train", total=len(self.train_data_loader))
         for steps, (inputs, labels) in enumerate(self.train_data_loader):
-          with torch.autocast(device_type=self.device, dtype=torch.bfloat16, enabled=self.train_params["use_amp"]):
-            output = self.model(
-              inputs.to(torch.int).to(self.device))
+          # with torch.autocast(device_type=self.device, dtype=torch.bfloat16, enabled=self.train_params["use_amp"]):
+          output = self.model(
+            inputs.to(torch.int).to(self.device))
 
-            loss = self._compute_loss(labels, output)
-            accuracy = self._compute_accuracy(labels, output)
+          loss = self._compute_loss(labels, output)
+          accuracy = self._compute_accuracy(labels, output)
 
           scaler.scale(loss).backward()
 

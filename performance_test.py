@@ -6,11 +6,11 @@ import toml
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-vocab_size = 200
+vocab_size = 20000
 
 config = toml.load(open('config.toml'))
-x = torch.randint(low=0, high=vocab_size, size=(config["train"]["batch_size"], 128)).to(device)
-y = torch.randint(low=0, high=vocab_size, size=(config["train"]["batch_size"], 128)).to(device)
+x = torch.randint(low=0, high=vocab_size, size=(config["train"]["batch_size"], 256)).to(device)
+y = torch.randint(low=0, high=vocab_size, size=(config["train"]["batch_size"], 256)).to(device)
 
 forward = 0
 backward = 0
