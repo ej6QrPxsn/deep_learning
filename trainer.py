@@ -241,6 +241,8 @@ class Trainer:
       for epoch in range(TOTAL_EPOCH):
         task2 = progress.add_task("Train", total=len(self.train_data_loader))
         for steps, (inputs, labels) in enumerate(self.train_data_loader):
+          optimizer.zero_grad()
+
           # with torch.autocast(device_type=self.device, dtype=torch.bfloat16, enabled=self.train_params["use_amp"]):
           output = self.model(
             inputs.to(torch.int).to(self.device))
@@ -248,11 +250,15 @@ class Trainer:
           loss = self._compute_loss(labels, output)
           accuracy = self._compute_accuracy(labels, output)
 
-          scaler.scale(loss).backward()
+          # scaler.scale(loss).backward()
+          loss.backward()
+
+          torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.train_params["grad_clip"])
 
           if (steps + 1) % self.train_params["accum_iter"] == 0 or (steps + 1) == len(self.train_data_loader):
-            scaler.step(optimizer)
-            scaler.update()
+            # scaler.step(optimizer)
+            # scaler.update()
+            optimizer.step()
 
           loss_item = loss.item()
 

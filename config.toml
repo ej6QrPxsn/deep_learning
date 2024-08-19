@@ -22,4 +22,4 @@ batch_size = 32
 model_path = "model.pt"
 grad_clip = 1.0
 accum_iter = 2
-use_amp = 1
+use_amp = true

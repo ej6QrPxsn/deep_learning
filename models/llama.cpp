@@ -287,9 +287,9 @@ struct LLaMAImpl : torch::nn::Module
     {
       for (int j = 0; j < len; j++)
       {
-        // 要素がすべてpaddingなら-inf、そうでないなら0
+        // 要素がすべてpaddingなら0、そうでないなら1
         padding_mask.index_put_({i, Slice(), j},
-                                torch::where(torch::all(x.index({i, j}) == pad_id), -INFINITY, 0));
+                                torch::where(torch::all(x.index({i, j}) == pad_id), 0, 1));
       }
     }
 
