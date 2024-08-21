@@ -1,8 +1,8 @@
 [model]
-d_model = 512
+d_model = 64
 d_ff_scalar = 4
-num_layer = 16
-num_head = 16
+num_layer = 2
+num_head = 4
 dropout = 0.1
 Bc = 32
 Br = 32
@@ -18,7 +18,7 @@ lr_min = 3e-5
 label_smoothing = 0.1
 warmup_steps = 2000
 pad_id = 3
-batch_size = 32
+batch_size = 1
 model_path = "model.pt"
 grad_clip = 1.0
 accum_iter = 2

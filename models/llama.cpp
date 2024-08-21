@@ -30,13 +30,22 @@ TORCH_MODULE(RMSNorm);
 
 struct SwiGLUImpl : torch::nn::Module
 {
-  SwiGLUImpl() {}
+  SwiGLUImpl()   {
+    auto data = toml::parse("config.toml");
+    auto d_model = toml::find<int>(data, "model", "d_model");
+    auto d_ff_scalar = toml::find<int>(data, "model", "d_ff_scalar");
+    auto d_ff = d_ff_scalar * d_model;
+
+    linear = register_module("linear", torch::nn::Linear(d_ff, d_ff * 2));
+  }
 
   torch::Tensor forward(torch::Tensor x)
   {
-    auto ret = x.chunk(2, -1);
+    auto ret = linear(x).chunk(2, -1);
     return ret[0] * torch::nn::functional::silu(ret[1]);
   }
+
+  torch::nn::Linear linear = nullptr;
 };
 TORCH_MODULE(SwiGLU);
 
@@ -130,7 +139,7 @@ struct FeedForwardNetworksImpl : torch::nn::Module
     auto d_ff_scalar = toml::find<int>(data, "model", "d_ff_scalar");
     auto d_ff = d_model * d_ff_scalar;
     linear1 = register_module("linear1", torch::nn::Linear(d_model, d_ff));
-    linear2 = register_module("linear2", torch::nn::Linear(d_ff / 2, d_model));
+    linear2 = register_module("linear2", torch::nn::Linear(d_ff, d_model));
   }
 
   torch::Tensor forward(torch::Tensor x)

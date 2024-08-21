@@ -10,7 +10,7 @@ namespace cg = cooperative_groups;
 
 using namespace torch::indexing;
 
-const int BLOCKSIZE = 32;
+const int BLOCKSIZE = 4;
 #define CEIL_DIV(A, B) (((A) + (B) - 1) / (B))
 
 #define gpuErrchk(ans)                    \
@@ -29,7 +29,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
 
 __global__ void forward_get_m(int M, const float *rowmax_S, const float *prev_m, float *m)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -43,9 +43,9 @@ __global__ void forward_get_m(int M, const float *rowmax_S, const float *prev_m,
 }
 
 __global__ void forward_get_P(int M, int N, const float *S, const float *m,
-                              const float *mask, float *P, float *rowsum_P)
+                              float *P, float *rowsum_P)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -55,7 +55,7 @@ __global__ void forward_get_P(int M, int N, const float *S, const float *m,
     auto m_idx = batch * M + x;
     auto S_idx = batch * M * N + x * N + y;
 
-    auto val = expf(S[S_idx] - m[m_idx]) * mask[batch * N + y];
+    auto val = expf(S[S_idx] - m[m_idx]);
     P[S_idx] = val;
     rowsum_P[m_idx] += val;
     // printf("P %d %d %f %f %f\n", x, y, S[S_idx], m[m_idx], rowsum_P[m_idx]);
@@ -65,7 +65,7 @@ __global__ void forward_get_P(int M, int N, const float *S, const float *m,
 __global__ void forward_get_l(int M,
                               const float *prev_m, const float *m, const float *rowsum_P, const float *prev_l, float *l)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -79,11 +79,29 @@ __global__ void forward_get_l(int M,
   }
 }
 
+__global__ void forward_first_get_O(int M, int N,
+                                    const float *prev_m, const float *m,
+                                    const float *PV, const float *prev_O, float *O)
+{
+  auto batch = blockIdx.x;
+
+  auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
+  auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
+
+  if (x < M && y < N)
+  {
+    auto m_idx = batch * M + x;
+    auto O_idx = batch * M * N + x * N + y;
+
+    O[O_idx] = PV[O_idx];
+  }
+}
+
 __global__ void forward_get_O(int M, int N,
                               const float *prev_m, const float *m,
                               const float *PV, const float *prev_O, float *O)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -95,14 +113,15 @@ __global__ void forward_get_O(int M, int N,
 
     O[O_idx] = (1 / expf(prev_m[m_idx] - m[m_idx])) * prev_O[O_idx];
     O[O_idx] += PV[O_idx];
-    // printf("O %d %d %f %f %f %f %f\n", x, y, prev_m[m_idx], m[m_idx], prev_O[O_idx], PV[O_idx], O[O_idx]);
+    // printf("O %d %d %f %f %f %f %f %f\n", x, y,
+    //        prev_m[m_idx], m[m_idx], prev_O[O_idx], PV[O_idx], 1 / expf(prev_m[m_idx]), O[O_idx]);
   }
 }
 
 __global__ void forward_set_Ol(int M, int N, const float *m,
                                const float *O, const float *l, float *O_list, float *l_list)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -118,9 +137,9 @@ __global__ void forward_set_Ol(int M, int N, const float *m,
 }
 
 __global__ void forward_get_S(int M, int N, int K,
-                              float *A, float *B, float *rowmax_S, float *S)
+                              const float *A, const float *B, const float *mask, float *rowmax_S, float *S)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -131,9 +150,11 @@ __global__ void forward_get_S(int M, int N, int K,
     for (int i = 0; i < K; ++i)
     {
       tmp += A[batch * M * K + x * K + i] * B[batch * K * N + i * N + y];
+      // printf("S1 %d %f %f %f\n", i, tmp, A[batch * M * K + x * K + i], B[batch * K * N + i * N + y]);
     }
 
-    S[batch * M * N + x * N + y] = tmp;
+    S[batch * M * N + x * N + y] = tmp * mask[batch * N + y];
+    // printf("S2 %u %u %u %f %f\n", batch, x, y, mask[batch * N + y], S[batch * M * N + x * N + y]);
     rowmax_S[batch * M + x] = max(rowmax_S[batch * M + x], tmp);
   }
 }
@@ -141,7 +162,7 @@ __global__ void forward_get_S(int M, int N, int K,
 __global__ void sgemm(int M, int N, int K,
                       float *A, float *B, float *C)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
 
@@ -160,7 +181,7 @@ __global__ void sgemm(int M, int N, int K,
 __global__ void sgemm_add(int M, int N, int K,
                           float *A, float *B, float *C)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -181,7 +202,7 @@ __global__ void sgemm_add(int M, int N, int K,
 __global__ void backward_get_P(int M, int N,
                                const float *S, const float *L, float *P)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -195,7 +216,7 @@ __global__ void backward_get_P(int M, int N,
 __global__ void backward_get_dS(int M, int N,
                                 const float *P, const float *dP, const float *D, float *dS)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -210,7 +231,7 @@ __global__ void backward_get_dS(int M, int N,
 __global__ void backward_set_dKV(int M, int N,
                                  const float *dK, const float *dV, float *dK_list, float *dV_list)
 {
-  auto batch = blockIdx.x * BLOCKSIZE;
+  auto batch = blockIdx.x;
 
   auto x = blockIdx.y * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
   auto y = blockIdx.z * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
@@ -270,7 +291,7 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
   auto O_list = torch::empty({B * nh, Tr, Br, hd}).to(dtype).to(Q.device());
   auto L_list = torch::empty({B * nh, Tr, Br}).to(dtype).to(Q.device());
 
-  auto S = torch::empty({B * nh, Br, Bc}).to(dtype).to(Q.device());
+  auto S = torch::empty({B * nh, Br, Bc}).to(dtype).contiguous().to(Q.device());
   auto P = S;
   auto PV = torch::empty({B * nh, Br, hd}).to(dtype).to(Q.device());
 
@@ -285,21 +306,13 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
   auto rowmax_S = torch::zeros({B * nh, Br}).to(dtype).to(Q.device());
   auto rowsum_P = torch::zeros({B * nh, Br}).to(dtype).to(Q.device());
 
-  dim3 gridDim(CEIL_DIV(B * nh, BLOCKSIZE), CEIL_DIV(Br, BLOCKSIZE), CEIL_DIV(Bc, BLOCKSIZE));
+  dim3 gridDim(B * nh, CEIL_DIV(Br, BLOCKSIZE), CEIL_DIV(Bc, BLOCKSIZE));
   dim3 blockDim(BLOCKSIZE * BLOCKSIZE);
 
-  cudaError_t cudaStat;
-  cublasStatus_t stat;
-  cublasHandle_t handle;
-
-  stat = cublasCreate(&handle);
-  if (stat != CUBLAS_STATUS_SUCCESS)
-  {
-    printf("CUBLAS initialization failed\n");
-    return {};
-  }
-
   size_t mem_size;
+
+  // std::cout << "Q " << Q_list << std::endl;
+  // std::cout << "K " << K_list << std::endl;
 
   for (int i = 0; i < Tr; i++)
   {
@@ -310,6 +323,7 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
 
     for (int j = 0; j < Tc; j++)
     {
+
       gridDim.z = CEIL_DIV(Bc, BLOCKSIZE);
       rowmax_S.fill_(-INFINITY);
       // printf("%d %d %d %d\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x);
@@ -317,18 +331,29 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
           Br, Bc, hd,
           Qi,
           K_list.index({Slice(), j}).contiguous().data_ptr<float>(),
+          mask_list.index({Slice(), j}).contiguous().data_ptr<float>(),
           rowmax_S.data_ptr<float>(),
           S.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "S " << "##################################" << std::endl;
+      std::cout << "Q " << Q_list.index({0, i, 0, Slice()}) << std::endl;
+      std::cout << "mask " << mask_list.index({0, j, 0}) << std::endl;
+      std::cout << "K " << K_list.index({0, j, Slice(), 0}) << std::endl;
+      std::cout << "S " << S.index({0, 0, Slice()}) << std::endl;
 
       gridDim.z = 1;
       forward_get_m<<<gridDim, blockDim>>>(
           Br,
           rowmax_S.data_ptr<float>(),
-          prev_m.data_ptr<float>(), m.data_ptr<float>());
+          prev_m.data_ptr<float>(),
+          m.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "m " << "##################################" << std::endl;
+      std::cout << "rowmax_S " << rowmax_S.index({0, 0}) << std::endl;
+      std::cout << "prev_m " << prev_m.index({0, 0}) << std::endl;
+      std::cout << "m " << m.index({0, 0}) << std::endl;
 
       gridDim.z = CEIL_DIV(Bc, BLOCKSIZE);
       rowsum_P.fill_(0);
@@ -336,11 +361,13 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
           Br, Bc,
           S.data_ptr<float>(),
           m.data_ptr<float>(),
-          mask_list.index({Slice(), j}).contiguous().data_ptr<float>(),
           P.data_ptr<float>(),
           rowsum_P.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "P " << "##################################" << std::endl;
+      std::cout << "P " << P.index({0, 0, Slice()}) << std::endl;
+      std::cout << "rowsum_P " << rowsum_P.index({0, 0}) << std::endl;
 
       gridDim.z = 1;
       forward_get_l<<<gridDim, blockDim>>>(
@@ -352,6 +379,9 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
           l.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "l " << "##################################" << std::endl;
+      std::cout << "prev_l " << prev_l.index({0, 0}) << std::endl;
+      std::cout << "l " << l.index({0, 0}) << std::endl;
 
       gridDim.z = CEIL_DIV(hd, BLOCKSIZE);
       // printf("%d %d %d %d\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x);
@@ -362,17 +392,40 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
           PV.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "PV " << "##################################" << std::endl;
+      std::cout << "P " << P.index({0, 0, Slice()}) << std::endl;
+      std::cout << "V " << V.index({0, Slice(), 0}) << std::endl;
+      std::cout << "PV " << PV.index({0, 0, Slice()}) << std::endl;
 
       gridDim.z = CEIL_DIV(Bc, BLOCKSIZE);
-      forward_get_O<<<gridDim, blockDim>>>(
-          Br, Bc,
-          prev_m.data_ptr<float>(),
-          m.data_ptr<float>(),
-          PV.data_ptr<float>(),
-          prev_O.data_ptr<float>(),
-          O.data_ptr<float>());
+      if (j > 0)
+      {
+        forward_get_O<<<gridDim, blockDim>>>(
+            Br, Bc,
+            prev_m.data_ptr<float>(),
+            m.data_ptr<float>(),
+            PV.data_ptr<float>(),
+            prev_O.data_ptr<float>(),
+            O.data_ptr<float>());
+      }
+      else
+      {
+        forward_first_get_O<<<gridDim, blockDim>>>(
+            Br, Bc,
+            prev_m.data_ptr<float>(),
+            m.data_ptr<float>(),
+            PV.data_ptr<float>(),
+            prev_O.data_ptr<float>(),
+            O.data_ptr<float>());
+      }
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "O " << "##################################" << std::endl;
+      std::cout << "prev_m " << prev_m.index({0, 0}) << std::endl;
+      std::cout << "m " << m.index({0, 0}) << std::endl;
+      std::cout << "PV " << PV.index({0, 0, Slice()}) << std::endl;
+      std::cout << "prev_O " << prev_O.index({0, 0, Slice()}) << std::endl;
+      std::cout << "O " << O.index({0, 0, Slice()}) << std::endl;
 
       prev_m.copy_(m);
       prev_l.copy_(l);
@@ -389,6 +442,10 @@ std::vector<torch::Tensor> flash_attention_cuda_forward(
         L_list.index({Slice(), i}).contiguous().data_ptr<float>());
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
+    std::cout << "O_list " << O_list.index({Slice(), i}) << std::endl;
+    std::cout << "L_list " << L_list.index({Slice(), i}) << std::endl;
+
+    break;
   }
 
   return {
@@ -431,7 +488,7 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
   auto D = torch::sum(dO * O, 3);
   auto D_list = D.reshape({B * nh, Tr, Br});
 
-  dim3 gridDim(CEIL_DIV(B * nh, BLOCKSIZE), CEIL_DIV(Br, BLOCKSIZE), CEIL_DIV(Bc, BLOCKSIZE));
+  dim3 gridDim(B * nh, CEIL_DIV(Br, BLOCKSIZE), CEIL_DIV(Bc, BLOCKSIZE));
   dim3 blockDim(BLOCKSIZE * BLOCKSIZE);
 
   size_t mem_size;
@@ -462,6 +519,9 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
           S.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "Q " << Q_list.index({Slice(), i}) << std::endl;
+      std::cout << "K " << K_list.index({Slice(), j}).transpose(-1, -2) << std::endl;
+      std::cout << "S " << S << std::endl;
 
       // P( 𝑗 )𝑖 = exp(S𝑖 𝑗 − 𝐿𝑖) ∈ R𝐵𝑟 ×𝐵𝑐
       auto P = S;
@@ -472,6 +532,8 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
           P.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "L " << L_list.index({Slice(), i}) << std::endl;
+      std::cout << "P " << P << std::endl;
 
       gridDim.y = CEIL_DIV(Bc, BLOCKSIZE);
       gridDim.z = CEIL_DIV(hd, BLOCKSIZE);
@@ -483,6 +545,7 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
           dV.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "dV " << dV << std::endl;
 
       gridDim.y = CEIL_DIV(Br, BLOCKSIZE);
       gridDim.z = CEIL_DIV(Bc, BLOCKSIZE);
@@ -495,6 +558,7 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
           dP.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "dP " << dP << std::endl;
 
       // dS( 𝑗 )𝑖 = P( 𝑗 )𝑖 ◦ (dP( 𝑗 )𝑖 − 𝐷𝑖) ∈ R𝐵𝑟 ×𝐵𝑐
       backward_get_dS<<<gridDim, blockDim>>>(
@@ -505,6 +569,7 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
           dS.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "dS " << dS << std::endl;
 
       gridDim.z = CEIL_DIV(hd, BLOCKSIZE);
       // Load dQ𝑖 from HBM to SRAM, then on chip,
@@ -516,6 +581,7 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
           dQ_list.index({Slice(), i}).contiguous().data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "dQ " << dQ_list.index({Slice(), i}) << std::endl;
 
       gridDim.y = CEIL_DIV(Bc, BLOCKSIZE);
       gridDim.z = CEIL_DIV(hd, BLOCKSIZE);
@@ -527,6 +593,7 @@ std::vector<torch::Tensor> flash_attention_cuda_backward(
           dK.data_ptr<float>());
       gpuErrchk(cudaPeekAtLastError());
       gpuErrchk(cudaDeviceSynchronize());
+      std::cout << "dK " << dK << std::endl;
     }
 
     gridDim.y = CEIL_DIV(Bc, BLOCKSIZE);
