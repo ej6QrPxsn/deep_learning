@@ -163,7 +163,7 @@ class SelfAttention(nn.Module):
 
   def _split_head(self, x):
     batch, len = x.shape[0], x.shape[1]
-    return x.view(batch, len, Config.num_head, Config.head_dim).transpose(2, 1)
+    return x.reshape(batch, len, Config.num_head, Config.head_dim).transpose(2, 1)
 
   def _scaled_dot_product_attention(self, q, k, v, mask):
 

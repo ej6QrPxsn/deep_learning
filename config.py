@@ -29,8 +29,5 @@ class Config(NamedTuple):
 
   model_path = "model.pt"
 
-
-class FlashAttentionConfig(NamedTuple):
-  sram_size = 128 * 1024
-  Bc = sram_size // (4 * Config.head_dim)
-  Br = min(sram_size // (4 * Config.head_dim), Config.head_dim)
+  Bc = 32
+  Br = 32

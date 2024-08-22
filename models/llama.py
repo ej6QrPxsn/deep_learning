@@ -16,8 +16,18 @@ class LLaMA(nn.Module):
     self.linear = nn.Linear(Config.d_model, vocab_size)
 
   def forward(self, x):
-    dec_out = self.decoder(x)
+    mask = self._get_padding_mask(x)
+    dec_out = self.decoder(x, mask)
     return self.linear(dec_out)
+
+  def _get_padding_mask(self, x):
+    batch, len = x.shape[0], x.shape[1]
+    padding_mask = torch.empty(batch, Config.num_head, len, dtype=bool).to(self.device)
+    for i in range(batch):
+      for j in range(len):
+        # 要素がすべてpaddingなら0、そうでないなら1
+        padding_mask[i, :, j] = torch.where(torch.all(x[i, j] == Config.pad_id), 0, 1)
+    return padding_mask
 
 
 class Embedding(nn.Module):
@@ -42,9 +52,9 @@ class Decoder(nn.Module):
     self.layers = nn.Sequential(*[DecoderLayer(device) for _ in range(Config.num_layer)])
     self.rms_norm = RMSNorm(Config.d_model, device).to(device)
 
-  def forward(self, x):
+  def forward(self, x, mask):
     embedd = self.embedding(x)
-    out1 = self.layers(embedd)
+    out1, mask = self.layers((embedd, mask))
     out2 = self.rms_norm(out1)
     return out2
 
@@ -63,19 +73,19 @@ class DecoderLayer(nn.Module):
     self.rope = Rope(device)
 
   def forward(self, input):
-    x = input
+    x, mask = input
 
     rope_x = self.rope(x)
 
     norm_x1 = self.rms_norm1(rope_x)
-    attn_out = self.attention(norm_x1)
+    attn_out = self.attention(norm_x1, mask)
     out1 = self.dropout1(attn_out + rope_x)
 
     norm_x2 = self.rms_norm2(out1)
     ffn_out = self.ffn(norm_x2)
     out2 = self.dropout2(ffn_out + out1)
 
-    return out2
+    return out2, mask
 
 
 class SelfAttention(nn.Module):
@@ -91,7 +101,7 @@ class SelfAttention(nn.Module):
 
     self.flash_attention = FlashAttention.apply
 
-  def forward(self, x):
+  def forward(self, x, mask):
     batch, len, dim = x.shape
     q = self._split_head(self.W_Q(x))
     k = self._split_head(self.W_K(x))
@@ -99,23 +109,21 @@ class SelfAttention(nn.Module):
 
     attention = torch.empty_like(q)
 
-    for i in range(q.shape[0]):
-      for j in range(q.shape[1]):
-        attention[i, j] = self.flash_attention(q[i, j], k[i, j], v[i, j])
+    attention[:] = self.flash_attention(q, k, v, mask)
 
     return self.W_O(attention.reshape(batch, len, -1))
 
   def _split_head(self, x):
     batch, len = x.shape[0], x.shape[1]
-    return x.view(batch, len, Config.num_head, Config.head_dim).transpose(2, 1)
+    return x.reshape(batch, len, Config.num_head, Config.head_dim).transpose(2, 1).reshape(-1, len, Config.head_dim)
 
 
 class FeedForwardNetworks(nn.Module):
   def __init__(self, device) -> None:
     super(FeedForwardNetworks, self).__init__()
     self.linear1 = nn.Linear(Config.d_model, Config.d_ff).to(device)
-    self.linear2 = nn.Linear(Config.d_ff // 2, Config.d_model).to(device)
-    self.swi_glu = SwiGLU()
+    self.linear2 = nn.Linear(Config.d_ff, Config.d_model).to(device)
+    self.swi_glu = SwiGLU(device)
 
   def forward(self, x):
     out = self.swi_glu(self.linear1(x))
@@ -178,6 +186,10 @@ class RMSNorm(nn.Module):
 
 
 class SwiGLU(nn.Module):
+  def __init__(self, device) -> None:
+    super(SwiGLU, self).__init__()
+    self.linear = nn.Linear(Config.d_ff, Config.d_ff * 2).to(device)
+
   def forward(self, x):
-    a, b = x.chunk(2, dim=-1)
+    a, b = self.linear(x).chunk(2, dim=-1)
     return a * F.silu(b)

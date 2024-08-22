@@ -9,9 +9,9 @@ from timm.scheduler import CosineLRScheduler
 import os
 import sys
 
+from config import Config
 from models.llama import LLaMA
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import Config, FlashAttentionConfig
 import torch.nn.utils.rnn as rnn
 from datasets import load_dataset
 import sentencepiece as spm
@@ -45,9 +45,9 @@ def pad_batch_fn(batch):
     inputs.append(item[0])
     labels.append(item[1])
 
-  rest_len = max_len % FlashAttentionConfig.Br
+  rest_len = max_len % Config.Br
   if rest_len != 0:
-    max_len += FlashAttentionConfig.Br - rest_len
+    max_len += Config.Br - rest_len
 
   return (
     rnn.pad_packed_sequence(
@@ -303,7 +303,7 @@ class Trainer:
 
 
 if __name__ == '__main__':
-  torch.autograd.set_detect_anomaly(True)
+  # torch.autograd.set_detect_anomaly(True)
   trainer = Trainer()
   trainer.train()
   # trainer.test_output()
