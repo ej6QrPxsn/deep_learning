@@ -9,7 +9,6 @@ import os
 import sys
 
 from models.llama import LLaMA
-from models.transformer import Transformer
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 import torch.nn.utils.rnn as rnn
@@ -36,9 +35,30 @@ def build_vocab(data, vocab_size):
 
 
 def pad_batch_fn(batch):
-  return (
-    rnn.pad_sequence(batch, batch_first=True, padding_value=Config.pad_id)
-  )
+  list_len = [len(i) for i in batch]
+  max_len = max(list_len)
+
+  actual_max_len = max_len - 1
+  if actual_max_len % Config.Br != 0:
+    rest_len = actual_max_len % Config.Br
+    if rest_len != 0:
+      actual_max_len += Config.Br - rest_len
+
+  return rnn.pad_packed_sequence(
+      rnn.pack_sequence(batch, enforce_sorted=False),
+      batch_first=True, padding_value=Config.pad_id, total_length=actual_max_len + 1)[0]
+
+
+def pad_batch(inputs):
+  max_len = len(inputs[0])
+
+  rest_len = max_len % Config.Br
+  if rest_len != 0:
+    max_len += Config.Br - rest_len
+
+  return rnn.pad_packed_sequence(
+      rnn.pack_sequence(inputs, enforce_sorted=False),
+      batch_first=True, padding_value=Config.pad_id, total_length=max_len)[0]
 
 
 class TrainDataSet(torch.utils.data.Dataset):
@@ -237,12 +257,12 @@ class Trainer:
           del loss
           del output
           del inputs, labels
-          torch.cuda.empty_cache()
 
           if total_steps % 100 == 0:
             self.test(total_steps)
             torch.save(self.model.state_dict(), Config.model_path)
             self.model.train()
+            torch.cuda.empty_cache()
 
           progress.update(task2, advance=1)
           progress.refresh()
@@ -263,7 +283,7 @@ class Trainer:
 
     for i in range(labels.shape[1]):
       with torch.no_grad():
-        output = self.model(decode_input)
+        output = self.model(pad_batch(decode_input))
 
       id = torch.argmax(output[:, -1], dim=-1).reshape(1, 1)
       if id == self.eos_id:

@@ -9,9 +9,9 @@ class Config(NamedTuple):
 
   d_model = 512
   d_ff = 2 // 3 * 4 * d_model
-  num_layer = 8
+  num_layer = 16
 
-  num_head = 8
+  num_head = 16
   head_dim = d_model // num_head
 
   batch_size = 64
@@ -26,3 +26,6 @@ class Config(NamedTuple):
   label_smoothing = 0.1
 
   model_path = "model.pt"
+
+  Br = 32
+  Bc = 32

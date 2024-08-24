@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from config import Config
+from models.flash_attention import FlashAttentionFunction
 
 
 class LLaMA(nn.Module):
@@ -15,29 +16,25 @@ class LLaMA(nn.Module):
     self.linear = nn.Linear(Config.d_model, vocab_size)
 
   def forward(self, x):
-    dec_padding_mask, lookahead_mask = self._create_masks(x)
-    dec_out = self.decoder(x, dec_padding_mask, lookahead_mask)
+    mask = self._create_masks(x)
+    dec_out = self.decoder(x, mask)
     return self.linear(dec_out)
 
   def _create_masks(self, x):
     dec_padding_mask = self._get_padding_mask(x)
-    lookahead_mask = self._get_lookahead_mask(x)
 
-    return dec_padding_mask, lookahead_mask
-
-  def _get_lookahead_mask(self, x):
-    batch, len = x.shape[0], x.shape[1]
-    mask = torch.ones(batch, Config.num_head, len, len).tril().to(self.device)
-    return torch.where(mask == 1, 0, torch.tensor(-float('inf')).to(self.device))
+    return dec_padding_mask
 
   def _get_padding_mask(self, x):
     batch, len = x.shape[0], x.shape[1]
-    padding_mask = torch.empty(batch, Config.num_head, 1, len, dtype=bool).to(self.device)
+    padding_mask = torch.empty(batch, Config.num_head, len).to(self.device)
+    Tc = (len + Config.Bc - 1) // Config.Bc
+
     for i in range(batch):
       for j in range(len):
-        # 要素がすべてpaddingならtrue、そうでないならfalse
-        padding_mask[i, :, :, j] = torch.all(x[i, j] == Config.pad_id)
-    return torch.where(padding_mask == 1, torch.tensor(-float('inf')).to(self.device), padding_mask)
+        # 要素がすべてpaddingなら0、そうでないなら1
+        padding_mask[i, :, j] = torch.where(torch.all(x[i, j] == Config.pad_id), 0, 1)
+    return padding_mask.reshape(batch, Config.num_head, Tc, Config.Bc)
 
 
 class Embedding(nn.Module):
@@ -60,9 +57,9 @@ class Decoder(nn.Module):
     self.embedding = Embedding(vocab_size, Config.d_model)
     self.layers = nn.Sequential(*[DecoderLayer(device) for _ in range(Config.num_layer)])
 
-  def forward(self, x, pad_mask, lookahead_mask):
+  def forward(self, x, mask):
     embedd = self.embedding(x)
-    out = self.layers((embedd, pad_mask, lookahead_mask))
+    out = self.layers((embedd, mask))
     return out[0]
 
 
@@ -106,11 +103,11 @@ class DecoderLayer(nn.Module):
     self.ffn_block = SubLayerBlock(FeedForwardNetworks())
 
   def forward(self, input):
-    x, pad_mask, lookahead_mask = input
+    x, mask = input
     x_with_pos = self.rope(x)
-    out1 = self.attention_block(x_with_pos, lookahead_mask)
+    out1 = self.attention_block(x_with_pos, mask)
     out2 = self.ffn_block(out1, None)
-    return (out2, pad_mask, lookahead_mask)
+    return (out2, mask)
 
 
 class SubLayerBlock(nn.Module):
@@ -140,34 +137,24 @@ class SelfAttention(nn.Module):
     self.W_V = nn.Linear(Config.d_model, Config.d_model).to(device)
     self.W_O = nn.Linear(Config.d_model, Config.d_model).to(device)
 
+    self.flash_attention = FlashAttentionFunction.apply
+
   def forward(self, x, mask):
     q = self._split_head(self.W_Q(x))
     k = self._split_head(self.W_K(x))
     v = self._split_head(self.W_V(x))
 
-    attention = self._scaled_dot_product_attention(q, k, v, mask)
+    attention = self.flash_attention(q, k, v, mask)
 
-    concat_attention = self._concat_head(attention)
-
-    return self.W_O(concat_attention)
+    return self.W_O(self._concat_head(attention))
 
   def _split_head(self, x):
     batch, len = x.shape[0], x.shape[1]
-    return x.view(batch, len, Config.num_head, Config.head_dim).transpose(2, 1)
-
-  def _scaled_dot_product_attention(self, q, k, v, mask):
-
-    # batch * num_head * q_len * head_dim, batch * num_head * kv_len * head_dim
-    # batch * num_head * q_len * kv_len
-    qk = q @ k.transpose(-1, -2) / torch.sqrt(torch.tensor(k.shape[-1]))
-
-    # batch * num_head * q_len * kv_len, batch * num_head * kv_len * kv_len
-    # batch * num_head * q_len * kv_len
-    return F.softmax(qk + mask, dim=-1) @ v
+    return x.view(batch, len, Config.num_head, Config.head_dim).transpose(2, 1).reshape(-1, len, Config.head_dim)
 
   def _concat_head(self, x):
-    batch, len = x.shape[0], x.shape[2]
-    return x.transpose(2, 1).reshape(batch, len, -1)
+    _, len, hd = x.shape
+    return x.reshape(-1, Config.num_head, len, hd).transpose(2, 1).reshape(-1, len, Config.num_head * hd)
 
 
 class FeedForwardNetworks(nn.Module):
