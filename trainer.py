@@ -8,6 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 import sys
 
+from models.llama import LLaMA
 from models.transformer import Transformer
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
@@ -28,57 +29,75 @@ def build_vocab(data, vocab_size):
     model_writer=spm_model,
     vocab_size=vocab_size,
     pad_id=Config.pad_id,
+    user_defined_symbols=['<sep>']
   )
 
   return spm.SentencePieceProcessor(model_proto=spm_model.getvalue())
 
 
 def pad_batch_fn(batch):
-  inputs = []
-  labels = []
-  for i, item in enumerate(batch):
-    inputs.append(item[0])
-    labels.append(item[1])
-
   return (
-    rnn.pad_sequence(inputs, batch_first=True, padding_value=Config.pad_id),
-    rnn.pad_sequence(labels, batch_first=True, padding_value=Config.pad_id),
+    rnn.pad_sequence(batch, batch_first=True, padding_value=Config.pad_id)
   )
 
 
-class CustomDataSet(torch.utils.data.Dataset):
-  def __init__(self, src_vocab, dst_vocab, src_data, dst_data):
-    super(CustomDataSet, self).__init__()
+class TrainDataSet(torch.utils.data.Dataset):
+  def __init__(self, vocab, src_data, dst_data):
+    super(TrainDataSet, self).__init__()
 
-    self.src_vocab = src_vocab
-    self.dst_vocab = dst_vocab
+    self.vocab = vocab
 
     self.src_lines = src_data
     self.dst_lines = dst_data
+
+    self.sep_id = self.vocab.piece_to_id('<sep>')
 
   def __len__(self):
     return len(self.src_lines)
 
   def __getitem__(self, index):
+    src = self.vocab.encode(self.src_lines[index])
+    dst = self.vocab.encode(self.dst_lines[index])
     inputs = torch.Tensor(
-      [self.dst_vocab.bos_id()]
-      + self.src_vocab.encode(self.src_lines[index])
-      + [self.dst_vocab.eos_id()]
+      [self.vocab.bos_id()]
+      + src
+      + [self.sep_id]
+      + dst
+      + [self.vocab.eos_id()]
+    )
+    return inputs
+
+
+class ValidateDataSet(torch.utils.data.Dataset):
+  def __init__(self, vocab, src_data, dst_data):
+    super(ValidateDataSet, self).__init__()
+
+    self.vocab = vocab
+
+    self.src_lines = src_data
+    self.dst_lines = dst_data
+
+    self.sep_id = self.vocab.piece_to_id('<sep>')
+
+  def __len__(self):
+    return len(self.src_lines)
+
+  def __getitem__(self, index):
+    src = self.vocab.encode(self.src_lines[index])
+    dst = self.vocab.encode(self.dst_lines[index])
+    inputs = torch.Tensor(
+      [self.vocab.bos_id()]
+      + src
     )
 
-    outputs = torch.Tensor(
-      [self.dst_vocab.bos_id()]
-      + self.dst_vocab.encode(self.dst_lines[index])
-      + [self.dst_vocab.eos_id()]
+    labels = torch.Tensor(
+      dst
+      + [self.vocab.eos_id()]
     )
+    return inputs, labels
 
-    return (inputs, outputs)
-
-  def get_src_tokens(self, indicies):
-    return self.src_vocab.decode(indicies)
-
-  def get_dst_tokens(self, indicies):
-    return self.dst_vocab.decode(indicies)
+  def get_tokens(self, indicies):
+    return self.vocab.decode(indicies)
 
 
 class TransformerScheduler:
@@ -101,14 +120,11 @@ class Trainer:
     src_dataset = datasets["train"]["en"]
     dst_dataset = datasets["train"]["ja"]
 
-    self.src_vocab_size = 10000
-    self.dst_vocab_size = 10000
-    src_vocab = build_vocab(src_dataset, self.src_vocab_size)
-    self.dst_vocab = build_vocab(dst_dataset, self.dst_vocab_size)
+    self.vocab_size = 20000
+    vocab = build_vocab(src_dataset + dst_dataset, self.vocab_size)
 
-    train_dataset = CustomDataSet(
-      src_vocab,
-      self.dst_vocab,
+    train_dataset = TrainDataSet(
+      vocab,
       src_dataset,
       dst_dataset
     )
@@ -117,30 +133,22 @@ class Trainer:
         train_dataset, batch_size=Config.batch_size, shuffle=True,
         num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
 
-    validation_dataset = CustomDataSet(
-      src_vocab,
-      self.dst_vocab,
+    self.validation_dataset = ValidateDataSet(
+      vocab,
       datasets["validation"]["en"],
       datasets["validation"]["ja"]
     )
 
-    self.validation_data_loader = torch.utils.data.DataLoader(
-      validation_dataset, batch_size=1, shuffle=True,
-      num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
+    self.validation_data_itr = iter(torch.utils.data.DataLoader(
+      self.validation_dataset, batch_size=1, shuffle=True,
+      num_workers=2, pin_memory=True))
 
-    self.test_dataset = CustomDataSet(
-      src_vocab,
-      self.dst_vocab,
-      datasets["test"]["en"],
-      datasets["test"]["ja"]
-    )
-
-    self.test_data_loader = torch.utils.data.DataLoader(
-      self.test_dataset, batch_size=1, shuffle=True, collate_fn=pad_batch_fn)
+    self.sep_id = self.validation_dataset.sep_id
+    self.eos_id = vocab.eos_id()
 
     self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    self.model = Transformer(self.src_vocab_size, self.dst_vocab_size, self.device).to(self.device)
+    self.model = LLaMA(self.vocab_size, self.device).to(self.device)
 
     self.criterion = torch.nn.CrossEntropyLoss(label_smoothing=Config.label_smoothing, reduction="none")
     self.scaler = torch.cuda.amp.GradScaler(enabled=Config.use_amp)
@@ -152,7 +160,7 @@ class Trainer:
 
   def _compute_loss(self, label, output):
     logits = self.criterion(
-      output.view(-1, self.dst_vocab_size),
+      output.view(-1, self.vocab_size),
       label.reshape(-1).to(torch.long).to(self.device))
 
     # パディングマスク
@@ -204,16 +212,15 @@ class Trainer:
 
       for epoch in range(TOTAL_EPOCH):
         task2 = progress.add_task("Train", total=len(self.train_data_loader))
-        for steps, (inputs, labels) in enumerate(self.train_data_loader):
-          decoder_input = labels[:, :-1]
-          output_label = labels[:, 1:]
+        for steps, batches in enumerate(self.train_data_loader):
+          inputs = batches[:, :-1]
+          labels = batches[:, 1:]
           with torch.autocast(device_type=self.device, dtype=torch.bfloat16, enabled=Config.use_amp):
             output = self.model(
-              inputs.to(torch.int).to(self.device),
-              decoder_input.to(torch.int).to(self.device))
+              inputs.to(torch.int).to(self.device))
 
-            loss = self._compute_loss(output_label, output)
-            accuracy = self._compute_accuracy(output_label, output)
+            loss = self._compute_loss(labels, output)
+            accuracy = self._compute_accuracy(labels, output)
 
           scaler.scale(loss).backward()
 
@@ -245,48 +252,41 @@ class Trainer:
 
   def test(self, steps):
     self.model.eval()
-    for inputs, labels in self.validation_data_loader:
-      input = inputs.to(torch.int).to(self.device)
+    inputs, labels = next(self.validation_data_itr)
 
-      id = self.dst_vocab.bos_id()
+    # input_tokens = self.validation_dataset.get_tokens(inputs.to(torch.int).tolist()[0])
+    # label_tokens = self.validation_dataset.get_tokens(labels.to(torch.int).tolist()[0])
+    # print("valid ", input_tokens, label_tokens)
 
-      decode_output = torch.tensor(id).reshape(1, 1).to(self.device)
+    decode_input = torch.tensor(self.sep_id).reshape(1, 1)
+    decode_input = torch.cat((inputs, decode_input), dim=-1).to(torch.int).to(self.device)
 
-      for i in range(labels.shape[1]):
-        with torch.no_grad():
-          output = self.model(
-            input,
-            decode_output
-          )
+    for i in range(labels.shape[1]):
+      with torch.no_grad():
+        output = self.model(decode_input)
 
-        id = torch.argmax(output[:, -1], dim=-1).reshape(1, 1)
-        if id == self.dst_vocab.eos_id():
-          break
+      id = torch.argmax(output[:, -1], dim=-1).reshape(1, 1)
+      if id == self.eos_id:
+        break
 
-        decode_output = torch.cat((decode_output, id), dim=-1)
+      decode_input = torch.cat((decode_input, id), dim=-1)
 
-      input_tokens = self.test_dataset.get_src_tokens(inputs.to(torch.int).tolist()[0])
+    input_tokens = self.validation_dataset.get_tokens(inputs.to(torch.int).tolist()[0])
 
-      output2 = torch.softmax(output, dim=2)
-      indicies = torch.argmax(output2, dim=-1)[0].to(torch.int).tolist()
-      label_tokens = self.test_dataset.get_dst_tokens(indicies)
+    output2 = torch.softmax(output, dim=2)
+    indicies = torch.argmax(output2, dim=-1)[0].to(torch.int).tolist()
+    label_tokens = self.validation_dataset.get_tokens(indicies)
 
-      dt_now = datetime.datetime.now()
-      d = dt_now.strftime('%Y/%m/%d %H:%M:%S')
-      with open("validation.txt", "+a") as f:
-        f.write(f"{d} ----------------\n")
-        f.write(f"{input_tokens}\n")
-        f.write(f"{label_tokens}\n")
-
-      del output
-      del inputs, labels
-      torch.cuda.empty_cache()
-
-      return
+    dt_now = datetime.datetime.now()
+    d = dt_now.strftime('%Y/%m/%d %H:%M:%S')
+    with open("validation.txt", "+a") as f:
+      f.write(f"{d} ----------------\n")
+      f.write(f"{input_tokens}\n")
+      f.write(f"{label_tokens}\n")
 
 
 if __name__ == '__main__':
-  torch.autograd.set_detect_anomaly(True)
+  # torch.autograd.set_detect_anomaly(True)
   trainer = Trainer()
   trainer.train()
   # trainer.test_output()

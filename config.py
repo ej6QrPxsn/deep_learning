@@ -9,12 +9,12 @@ class Config(NamedTuple):
 
   d_model = 512
   d_ff = 2048
-  num_layer = 6
+  num_layer = 8
 
   num_head = 8
   head_dim = d_model // num_head
 
-  batch_size = 128
+  batch_size = 64
   accum_iter = 1
 
   adam_lr = 1e-9
