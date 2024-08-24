@@ -285,6 +285,8 @@ class Trainer:
       with torch.no_grad():
         output = self.model(pad_batch(decode_input))
 
+      output = output[:, :i + 2]
+
       id = torch.argmax(output[:, -1], dim=-1).reshape(1, 1)
       if id == self.eos_id:
         break
