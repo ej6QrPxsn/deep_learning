@@ -1,5 +1,6 @@
 
 import datetime
+import functools
 import io
 import torch
 
@@ -35,7 +36,22 @@ def build_vocab(data, vocab_size):
   return spm.SentencePieceProcessor(model_proto=spm_model.getvalue())
 
 
-def pad_batch_fn(batch):
+def pad_batch(inputs):
+  max_len = 0
+  for i, item in enumerate(inputs):
+    if len(item) > max_len:
+      max_len = len(item)
+
+  rest_len = max_len % Config.Br
+  if rest_len != 0:
+    max_len += Config.Br - rest_len
+
+  return rnn.pad_packed_sequence(
+      rnn.pack_sequence(inputs, enforce_sorted=False),
+      batch_first=True, padding_value=Config.pad_id, total_length=max_len)[0]
+
+
+def pad_batch_fn(batch, dataset):
   inputs = []
   labels = []
   max_len = 0
@@ -74,17 +90,19 @@ class CustomDataSet(torch.utils.data.Dataset):
     return len(self.src_lines)
 
   def __getitem__(self, index):
+    enc_src = self.vocab.encode(self.src_lines[index])
+    enc_dst = self.vocab.encode(self.dst_lines[index])
     inputs = torch.Tensor(
       [self.vocab.bos_id()]
-      + self.vocab.encode(self.src_lines[index])
+      + enc_src
       + [self.sep_id]
-      + self.vocab.encode(self.dst_lines[index])
+      + enc_dst
     )
 
     outputs = torch.Tensor(
-      self.vocab.encode(self.src_lines[index])
+      enc_src
       + [self.sep_id]
-      + self.vocab.encode(self.dst_lines[index])
+      + enc_dst
       + [self.vocab.eos_id()]
     )
 
@@ -144,9 +162,10 @@ class Trainer:
       dst_dataset,
     )
 
+    collate_fn = functools.partial(pad_batch_fn, dataset=train_dataset)
     self.train_data_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=Config.batch_size, shuffle=True,
-        num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
+        num_workers=2, pin_memory=True, collate_fn=collate_fn)
 
     self.validation_dataset = ValidateDataSet(
       self.vocab,
@@ -156,7 +175,7 @@ class Trainer:
 
     self.validation_data_loader = torch.utils.data.DataLoader(
       self.validation_dataset, batch_size=1, shuffle=True,
-      num_workers=2, pin_memory=True, collate_fn=pad_batch_fn)
+      num_workers=2, pin_memory=True)
 
     self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -265,6 +284,10 @@ class Trainer:
   def test(self, steps):
     self.model.eval()
     for inputs, labels in self.validation_data_loader:
+      # input_tokens = self.validation_dataset.get_tokens(inputs.to(torch.int).tolist()[0])
+      # label_tokens = self.validation_dataset.get_tokens(labels.to(torch.int).tolist()[0])
+      # print("valid ", input_tokens, label_tokens)
+
       id = self.validation_dataset.sep_id
 
       decode_output = torch.tensor(id).reshape(1, 1)
@@ -273,7 +296,7 @@ class Trainer:
       for i in range(labels.shape[1]):
         with torch.no_grad():
           output = self.model(
-            decode_output
+            pad_batch(decode_output)
           )
 
         id = torch.argmax(output[:, -1], dim=-1).reshape(1, 1)

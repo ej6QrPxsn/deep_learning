@@ -4,6 +4,10 @@ from config import Config
 
 
 class FlashAttention(torch.autograd.Function):
+  def _get_lookahead_mask(self, batch, x, y):
+    mask = torch.ones(batch, Config.num_head, x, y).tril().to(self.device)
+    return torch.where(mask == 1, 0, torch.tensor(-float('inf')).to(self.device))
+
   @staticmethod
   def forward(ctx, Q, K, V, mask):
     B, N, hd = Q.size()
@@ -19,6 +23,7 @@ class FlashAttention(torch.autograd.Function):
     K_list = K.reshape(B, Tc, Bc, hd)
     V_list = V.reshape(B, Tc, Bc, hd)
     mask_list = mask.reshape(B, Tc, Bc, 1)
+    lookahead_mask = torch.ones(B, Br, Bc).tril().to(Q.device)
 
     O = torch.empty(B, Tr, Br, hd, dtype=Q.dtype).to(Q.device)
     L = torch.empty(B, Tr, Br, dtype=Q.dtype).to(Q.device)
@@ -37,7 +42,7 @@ class FlashAttention(torch.autograd.Function):
         Sij = Qi @ Kj.transpose(-1, -2)
 
         mij = torch.maximum(mij_1, torch.max(Sij, dim=-1)[0])
-        Pij = torch.exp(Sij - mij.unsqueeze(-1)) * mask_list[:, j]
+        Pij = torch.exp(Sij - mij.unsqueeze(-1))  # * mask_list[:, j]) * lookahead_mask
         lij = torch.exp(mij_1 - mij) * li_1 + torch.sum(Pij, dim=-1)
         Oij = (1 / torch.exp(mij_1 - mij)).unsqueeze(-1) * Oi_1 + Pij @ Vj
 
