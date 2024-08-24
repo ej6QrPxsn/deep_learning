@@ -45,25 +45,12 @@ class Embedding(nn.Module):
     super(Embedding, self).__init__()
 
     self.device = device
-    self.embedding = nn.Embedding(vocab_size, Config.d_model).to(device)
+    self.embedding = nn.Embedding(vocab_size, Config.d_model)
     self.dropout = nn.Dropout(Config.dropout)
 
-  def _positional_encoding(self, len):
-    pos = torch.arange(len).to(self.device)
-    i = torch.arange(Config.d_model).to(self.device)
-
-    sin = torch.sin(torch.einsum('i,j->ij', pos, 10000 ** (-2 * i[0::2] / Config.d_model)))
-    cos = torch.cos(torch.einsum('i,j->ij', pos, 10000 ** (-2 * i[1::2] / Config.d_model)))
-    return torch.stack((sin, cos), dim=1).reshape(len, -1).unsqueeze(0)
-
   def forward(self, x):
-    batch = x.shape[0]
-    seq = x.shape[1]
-
     embedd = self.embedding(x)
-    pos_enc = self._positional_encoding(seq).repeat(batch, 1, 1)
-
-    return self.dropout(embedd + pos_enc)
+    return self.dropout(embedd)
 
 
 class Decoder(nn.Module):
@@ -79,33 +66,67 @@ class Decoder(nn.Module):
     return out[0]
 
 
+class Rope(nn.Module):
+  def __init__(self, device) -> None:
+    super(Rope, self).__init__()
+
+    self.device = device
+
+  def _rot(self, x):
+    batch, len = x.shape[0], x.shape[1]
+
+    second = x[:, :, 0::2]
+    first = x[:, :, 1::2] * -1
+    new_x = torch.stack((first, second), dim=2)
+    return new_x.reshape(batch, len, -1)
+
+  def forward(self, x):
+    len = x.shape[1]
+
+    half_d = Config.d_model // 2
+
+    m = torch.arange(1, len + 1).to(self.device)
+    i = torch.arange(1, half_d + 1).to(self.device)
+    theta = (10000 ** (-2 * i / Config.d_model))
+
+    cos = torch.cos(torch.einsum('i,j->ij', m, theta))
+    sin = torch.sin(torch.einsum('i,j->ij', m, theta))
+
+    C = torch.stack((cos, cos), dim=1).reshape(1, len, -1)
+    S = torch.stack((sin, sin), dim=1).reshape(1, len, -1)
+
+    return x * C + self._rot(x) * S
+
+
 class DecoderLayer(nn.Module):
   def __init__(self, device) -> None:
     super(DecoderLayer, self).__init__()
-    self.masked_block = SubLayerBlock(SelfAttention(device), device)
-    self.ffn_block = SubLayerBlock(FeedForwardNetworks(device), device)
+    self.rope = Rope(device)
+    self.attention_block = SubLayerBlock(SelfAttention(device))
+    self.ffn_block = SubLayerBlock(FeedForwardNetworks())
 
   def forward(self, input):
     x, pad_mask, lookahead_mask = input
-    out1 = self.masked_block(x, x, lookahead_mask)
-    out2 = self.ffn_block(out1, None, None)
+    x_with_pos = self.rope(x)
+    out1 = self.attention_block(x_with_pos, lookahead_mask)
+    out2 = self.ffn_block(out1, None)
     return (out2, pad_mask, lookahead_mask)
 
 
 class SubLayerBlock(nn.Module):
-  def __init__(self, sublayer, device) -> None:
+  def __init__(self, sublayer) -> None:
     super(SubLayerBlock, self).__init__()
 
+    self.rms_norm = RMSNorm()
     self.sublayer = sublayer
     self.dropout = nn.Dropout(Config.dropout)
-    self.layer_norm = nn.LayerNorm(Config.d_model).to(device)
 
-  def forward(self, query, memory, mask):
-    sublayer_out = self.sublayer(query, memory, mask)
+  def forward(self, x, mask):
+    norm_out = self.rms_norm(x)
+    sublayer_out = self.sublayer(norm_out, mask)
     dropped_out = self.dropout(sublayer_out)
-    norm_out = self.layer_norm(query + dropped_out)
 
-    return norm_out
+    return x + dropped_out
 
 
 class SelfAttention(nn.Module):
@@ -119,10 +140,10 @@ class SelfAttention(nn.Module):
     self.W_V = nn.Linear(Config.d_model, Config.d_model).to(device)
     self.W_O = nn.Linear(Config.d_model, Config.d_model).to(device)
 
-  def forward(self, query, memory, mask):
-    q = self._split_head(self.W_Q(query))
-    k = self._split_head(self.W_K(memory))
-    v = self._split_head(self.W_V(memory))
+  def forward(self, x, mask):
+    q = self._split_head(self.W_Q(x))
+    k = self._split_head(self.W_K(x))
+    v = self._split_head(self.W_V(x))
 
     attention = self._scaled_dot_product_attention(q, k, v, mask)
 
@@ -150,11 +171,31 @@ class SelfAttention(nn.Module):
 
 
 class FeedForwardNetworks(nn.Module):
-  def __init__(self, device) -> None:
+  def __init__(self) -> None:
     super(FeedForwardNetworks, self).__init__()
-    self.linear1 = nn.Linear(Config.d_model, Config.d_ff).to(device)
-    self.linear2 = nn.Linear(Config.d_ff, Config.d_model).to(device)
+    self.linear1 = nn.Linear(Config.d_model, Config.d_ff)
+    self.swi_glu = SwiGLU()
+    self.linear2 = nn.Linear(Config.d_ff, Config.d_model)
 
-  def forward(self, query, memory, mask):
-    out = F.relu(self.linear1(query))
+  def forward(self, x, mask):
+    out = self.swi_glu(self.linear1(x))
     return self.linear2(torch.where(out > 0, out, 0))
+
+
+class RMSNorm(nn.Module):
+  def __init__(self) -> None:
+    super().__init__()
+
+  def forward(self, x):
+    x_norm = 1 / x.pow(2).mean(dim=-1).sqrt()
+    return x * x_norm.unsqueeze(-1)
+
+
+class SwiGLU(nn.Module):
+  def __init__(self) -> None:
+    super(SwiGLU, self).__init__()
+    self.linear = nn.Linear(Config.d_ff, Config.d_ff * 2)
+
+  def forward(self, x):
+    a, b = self.linear(x).chunk(2, dim=-1)
+    return a * F.silu(b)

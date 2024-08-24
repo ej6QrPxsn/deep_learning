@@ -8,7 +8,7 @@ class Config(NamedTuple):
   pad_id = 3
 
   d_model = 512
-  d_ff = 2048
+  d_ff = 2 // 3 * 4 * d_model
   num_layer = 8
 
   num_head = 8
