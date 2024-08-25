@@ -1,4 +1,5 @@
 
+import math
 from typing import NamedTuple
 
 
@@ -29,3 +30,5 @@ class Config(NamedTuple):
 
   Br = 32
   Bc = 32
+  softmax_scaling = 1 / math.sqrt(d_model)
+  dropout_probabilty = 0.1
