@@ -285,9 +285,7 @@ class Trainer:
       with torch.no_grad():
         output = self.model(pad_batch(decode_input))
 
-      output = output[:, :i + 2]
-
-      id = torch.argmax(output[:, -1], dim=-1).reshape(1, 1)
+      id = torch.argmax(output[:, decode_input.shape[1] - 1], dim=-1).reshape(1, 1)
       if id == self.eos_id:
         break
 
@@ -295,7 +293,7 @@ class Trainer:
 
     input_tokens = self.validation_dataset.get_tokens(inputs.to(torch.int).tolist()[0])
 
-    output2 = torch.softmax(output, dim=2)
+    output2 = torch.softmax(output[:, inputs.shape[1] + 1:decode_input.shape[1]], dim=2)
     indicies = torch.argmax(output2, dim=-1)[0].to(torch.int).tolist()
     label_tokens = self.validation_dataset.get_tokens(indicies)
 

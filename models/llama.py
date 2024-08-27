@@ -28,13 +28,12 @@ class LLaMA(nn.Module):
   def _get_padding_mask(self, x):
     batch, len = x.shape[0], x.shape[1]
     padding_mask = torch.empty(batch, Config.num_head, len).to(self.device)
-    Tc = (len + Config.Bc - 1) // Config.Bc
 
     for i in range(batch):
       for j in range(len):
-        # 要素がすべてpaddingなら0、そうでないなら1
-        padding_mask[i, :, j] = torch.where(torch.all(x[i, j] == Config.pad_id), 0, 1)
-    return padding_mask.reshape(batch, Config.num_head, Tc, Config.Bc)
+        # 要素がすべてpaddingなら-inf、そうでないなら0
+        padding_mask[i, :, j] = torch.where(torch.all(x[i, j] == Config.pad_id), -float('inf'), 0)
+    return padding_mask
 
 
 class Embedding(nn.Module):
