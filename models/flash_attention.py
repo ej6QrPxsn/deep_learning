@@ -1,5 +1,6 @@
 import torch
 from config import Config
+from line_profiler import profile
 
 
 def diag(x):
@@ -13,6 +14,7 @@ def dropout(x, rng, p):
 
 class FlashAttentionFunction(torch.autograd.Function):
   @staticmethod
+  # @profile
   def forward(ctx, Q, K, V, mask):
     B, N, hd = Q.size()
 
@@ -27,15 +29,16 @@ class FlashAttentionFunction(torch.autograd.Function):
     KT_list = K.reshape(B, Tc, 1, Bc, hd).transpose(-1, -2)
     V_list = V.reshape(B, Tc, 1, Bc, hd)
     mask_list = mask.reshape(B, Tc, 1, 1, Bc)
-    lookahead_mask = torch.ones(B, Br, Bc).tril().to(Q.device)
-    lookahead_mask = torch.where(lookahead_mask == 0, -float('inf'), 0)
+    lookahead_mask = torch.full((B, Br, Bc), torch.tensor(-float('inf')), device=Q.device).triu(diagonal=1)
 
-    O = torch.empty(B, Tr, Br, hd, dtype=Q.dtype).to(Q.device)
-    L = torch.empty(B, Tr, Br, dtype=Q.dtype).to(Q.device)
+    O = torch.empty(B, Tr, Br, hd, dtype=Q.dtype, device=Q.device)
+    L = torch.empty(B, Tr, Br, dtype=Q.dtype, device=Q.device)
 
-    Oi_1 = torch.zeros(B, Tr, Br, hd, dtype=Q.dtype).to(Q.device)
-    li_1 = torch.zeros(B, Tr, Br, dtype=Q.dtype).to(Q.device)
-    mij_1 = torch.full((B, Tr, Br), torch.tensor(-float('inf')), dtype=Q.dtype).to(Q.device)
+    Oij_1 = torch.zeros(B, Tr, Br, hd, dtype=Q.dtype, device=Q.device)
+    lij_1 = torch.zeros(B, Tr, Br, dtype=Q.dtype, device=Q.device)
+    mij_1 = torch.full((B, Tr, Br), torch.tensor(-float('inf')), dtype=Q.dtype, device=Q.device)
+
+    minus_inf = torch.tensor(-float('inf'), dtype=Q.dtype, device=Q.device)
 
     rng = torch.Generator(Q.device)
     R = rng.get_state()
@@ -53,21 +56,22 @@ class FlashAttentionFunction(torch.autograd.Function):
       # ブロックが正方形の場合、行ブロックと同じ列ブロックのみ、マスクが必要になる
       Sij_masked[:, j] += lookahead_mask
       # 列より小さい行ブロックはすべて-inf
-      Sij_masked[:, :j] += -float('inf')
+      Sij_masked[:, :j] += minus_inf
 
       mij = torch.maximum(mij_1, torch.max(Sij_masked, dim=-1)[0])
       Pij = torch.exp(Sij_masked - mij.unsqueeze(-1))
 
-      lij = torch.exp(mij_1 - mij) * li_1 + torch.sum(Pij, dim=-1)
+      lij = torch.exp(mij_1 - mij) * lij_1 + torch.sum(Pij, dim=-1)
 
       Pij_dropped, _ = dropout(Pij, rng, P_drop)
-      Oij = torch.linalg.pinv(diag(torch.exp(mij_1 - mij))) @ Oi_1 + Pij_dropped @ Vj
+      mij_exp = torch.exp(mij_1 - mij)
+      Oij = torch.where(mij_exp == 0, 0, 1 / mij_exp).unsqueeze(-1) * Oij_1 + Pij_dropped @ Vj
 
-      Oi_1 = Oij
-      li_1 = lij
-      mij_1 = mij
+      Oij_1[:] = Oij
+      lij_1[:] = lij
+      mij_1[:] = mij
 
-    O[:] = torch.linalg.pinv(diag(lij)) @ Oij
+    O[:] = torch.where(lij == 0, 0, 1 / lij).unsqueeze(-1) * Oij
     L[:] = mij + torch.log(lij)
 
     ctx.save_for_backward(Q, K, V, O.reshape(B, N, hd), L.reshape(B, N), mask, R)
@@ -86,14 +90,14 @@ class FlashAttentionFunction(torch.autograd.Function):
     Tc = (N + Bc - 1) // Bc
 
     D = torch.sum(dO * O, dim=2)
-    D_list = D.reshape(B, Tr, 1, Br)
+    D_list = D.reshape(B, Tr, 1, Br).to(Q.dtype)
 
     Q_list = Q.reshape(B, Tr, 1, Br, hd)
     Kj = K.reshape(B, Tc, Bc, hd)
     Vj = V.reshape(B, Tc, Bc, hd)
 
-    dO_list = dO.reshape(B, Tr, 1, Br, hd)
-    L_list = L.reshape(B, Tr, 1, Br)
+    dO_list = dO.reshape(B, Tr, 1, Br, hd).to(Q.dtype)
+    L_list = L.reshape(B, Tr, 1, Br).to(Q.dtype)
 
     dQ_list = torch.zeros_like(Q_list)
     dKj = torch.zeros_like(Kj)
@@ -103,7 +107,8 @@ class FlashAttentionFunction(torch.autograd.Function):
     P_drop = Config.dropout_probabilty
 
     mask_list = mask.reshape(B, Tc, 1, Bc).to(Q.dtype)
-    lookahead_mask = torch.ones(B, Br, Bc).tril().to(Q.dtype).to(Q.device)
+    lookahead_mask = torch.full((B, Br, Bc), torch.tensor(-float('inf')), device=Q.device).triu(diagonal=1)
+    minus_inf = torch.tensor(-float('inf'), dtype=Q.dtype, device=Q.device)
 
     rng = torch.Generator(Q.device)
     rng.set_state(R)
@@ -121,7 +126,7 @@ class FlashAttentionFunction(torch.autograd.Function):
       # ブロックが正方形の場合、行ブロックと同じ列ブロックのみ、マスクが必要になる
       Sij_masked[:, i] += lookahead_mask
       # 行より大きい列ブロックはすべて-inf
-      Sij_masked[:, i:] += -float('inf')
+      Sij_masked[:, i:] += minus_inf
 
       Pij = torch.exp(Sij_masked - Li.unsqueeze(-1))
 

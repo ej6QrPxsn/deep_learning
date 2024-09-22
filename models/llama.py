@@ -1,3 +1,5 @@
+import math
+from line_profiler import profile
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,19 +8,29 @@ from config import Config
 from models.flash_attention import FlashAttentionFunction
 
 
+def init_linear(module):
+  stdv = 1. / math.sqrt(module.weight.size(1))
+  module.weight.data.uniform_(-stdv, stdv)
+  if module.bias is not None:
+    module.bias.data.uniform_(-stdv, stdv)
+
+
 class LLaMA(nn.Module):
   def __init__(self, vocab_size, device) -> None:
     super(LLaMA, self).__init__()
 
     self.device = device
     self.decoder = Decoder(vocab_size, Config.d_model)
+    self.rms_norm = RMSNorm()
 
     self.linear = nn.Linear(Config.d_model, vocab_size)
+    init_linear(self.linear)
 
   def forward(self, x):
     mask = self._create_masks(x)
     dec_out = self.decoder(x, mask)
-    return self.linear(dec_out)
+    norm_out = self.rms_norm(dec_out)
+    return self.linear(norm_out)
 
   def _create_masks(self, x):
     dec_padding_mask = self._get_padding_mask(x)
@@ -136,8 +148,14 @@ class SelfAttention(nn.Module):
     self.W_V = nn.Linear(Config.d_model, Config.d_model).to(device)
     self.W_O = nn.Linear(Config.d_model, Config.d_model).to(device)
 
+    init_linear(self.W_Q)
+    init_linear(self.W_K)
+    init_linear(self.W_V)
+    init_linear(self.W_O)
+
     self.flash_attention = FlashAttentionFunction.apply
 
+  # @profile
   def forward(self, x, mask):
     q = self._split_head(self.W_Q(x))
     k = self._split_head(self.W_K(x))
@@ -163,6 +181,9 @@ class FeedForwardNetworks(nn.Module):
     self.swi_glu = SwiGLU()
     self.linear2 = nn.Linear(Config.d_ff, Config.d_model)
 
+    init_linear(self.linear1)
+    init_linear(self.linear2)
+
   def forward(self, x, mask):
     out = self.swi_glu(self.linear1(x))
     return self.linear2(torch.where(out > 0, out, 0))
@@ -171,16 +192,21 @@ class FeedForwardNetworks(nn.Module):
 class RMSNorm(nn.Module):
   def __init__(self) -> None:
     super().__init__()
+    self.eps = Config.rms_norm_eps
+    self.gamma = nn.Parameter(torch.ones(Config.d_model), requires_grad=True)
 
   def forward(self, x):
-    x_norm = 1 / x.pow(2).mean(dim=-1).sqrt()
-    return x * x_norm.unsqueeze(-1)
+    rms = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+    x_norm = x / rms
+    return x_norm * self.gamma
 
 
 class SwiGLU(nn.Module):
   def __init__(self) -> None:
     super(SwiGLU, self).__init__()
     self.linear = nn.Linear(Config.d_ff, Config.d_ff * 2)
+
+    init_linear(self.linear)
 
   def forward(self, x):
     a, b = self.linear(x).chunk(2, dim=-1)
