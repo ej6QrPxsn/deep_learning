@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import Config
-from models.flash_attention import FlashAttentionFunction
+from deep_learning.config import Config
+from deep_learning.models.flash_attention import FlashAttentionFunction
 
 
 def init_linear(module):
@@ -20,7 +20,7 @@ class LLaMA(nn.Module):
     super(LLaMA, self).__init__()
 
     self.device = device
-    self.decoder = Decoder(vocab_size, Config.d_model)
+    self.decoder = Decoder(vocab_size, device)
     self.rms_norm = RMSNorm()
 
     self.linear = nn.Linear(Config.d_model, vocab_size)
@@ -65,12 +65,12 @@ class Decoder(nn.Module):
   def __init__(self, vocab_size, device) -> None:
     super(Decoder, self).__init__()
 
-    self.embedding = Embedding(vocab_size, Config.d_model)
+    # self.embedding = Embedding(vocab_size, Config.d_model)
     self.layers = nn.Sequential(*[DecoderLayer(device) for _ in range(Config.num_layer)])
 
   def forward(self, x, mask):
-    embedd = self.embedding(x)
-    out = self.layers((embedd, mask))
+    # embedd = self.embedding(x)
+    out = self.layers((x, mask))
     return out[0]
 
 
@@ -143,10 +143,10 @@ class SelfAttention(nn.Module):
 
     self.device = device
 
-    self.W_Q = nn.Linear(Config.d_model, Config.d_model).to(device)
-    self.W_K = nn.Linear(Config.d_model, Config.d_model).to(device)
-    self.W_V = nn.Linear(Config.d_model, Config.d_model).to(device)
-    self.W_O = nn.Linear(Config.d_model, Config.d_model).to(device)
+    self.W_Q = nn.Linear(Config.d_model, Config.d_model)
+    self.W_K = nn.Linear(Config.d_model, Config.d_model)
+    self.W_V = nn.Linear(Config.d_model, Config.d_model)
+    self.W_O = nn.Linear(Config.d_model, Config.d_model)
 
     init_linear(self.W_Q)
     init_linear(self.W_K)

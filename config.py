@@ -6,17 +6,17 @@ from typing import NamedTuple
 class Config(NamedTuple):
   use_amp = True
 
-  pad_id = 3
+  pad_id = 0
 
-  d_model = 1024
+  d_model = 128
   d_ff = math.ceil(2 / 3 * 4 * d_model)
   num_layer = 16
 
   num_head = 16
   head_dim = d_model // num_head
 
-  batch_size = 16
-  accum_iter = 4
+  batch_size = 128
+  accum_iter = 1
 
   adam_lr = 3e-5
   adam_eps = 1e-4
@@ -35,7 +35,7 @@ class Config(NamedTuple):
   pre_train_model_path = "pre_train_model.pt"
   model_path = "model.pt"
 
-  Br = 32
-  Bc = 32
+  Br = 50
+  Bc = 50
   softmax_scaling = 1 / math.sqrt(d_model)
   dropout_probabilty = 0.1

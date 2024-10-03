@@ -1,6 +1,7 @@
 import torch
-from config import Config
 from line_profiler import profile
+
+from deep_learning.config import Config
 
 
 def diag(x):
@@ -18,12 +19,34 @@ class FlashAttentionFunction(torch.autograd.Function):
   def forward(ctx, Q, K, V, mask):
     B, N, hd = Q.size()
 
-    Bc = Config.Bc
     Br = Config.Br
-
+    Bc = Config.Bc
     # 切り上げ除算
     Tr = (N + Br - 1) // Br
     Tc = (N + Bc - 1) // Bc
+
+    if N < Config.Br and N % Config.Br != 0:
+      Tr = 1
+      Br = N
+
+    if N < Config.Bc and N % Config.Bc != 0:
+      Tc = 1
+      Bc = N
+
+    if N > Config.Br and N % Config.Br != 0:
+      remainder = N % Config.Br
+      br_add = torch.zeros(B, Config.Br - remainder, hd, device=Q.device)
+      Q = torch.cat((Q, br_add), dim=1)
+
+    if N > Config.Bc and N % Config.Bc != 0:
+      remainder = N % Config.Bc
+      bc_add = torch.zeros(B, Config.Bc - remainder, hd, device=Q.device)
+      K = torch.cat((K, bc_add), dim=1)
+      V = torch.cat((V, bc_add), dim=1)
+      try:
+        mask = torch.cat((mask, torch.zeros(1, Config.Bc - remainder, device=Q.device)), dim=1)
+      except Exception:
+        print(N, Config.Bc, remainder, Config.Bc - remainder)
 
     Qi = Q.reshape(B, Tr, Br, hd)
     KT_list = K.reshape(B, Tc, 1, Bc, hd).transpose(-1, -2)
@@ -74,20 +97,27 @@ class FlashAttentionFunction(torch.autograd.Function):
     O[:] = torch.where(lij == 0, 0, 1 / lij).unsqueeze(-1) * Oij
     L[:] = mij + torch.log(lij)
 
-    ctx.save_for_backward(Q, K, V, O.reshape(B, N, hd), L.reshape(B, N), mask, R)
-    return O.reshape(B, N, hd)
+    ctx.save_for_backward(Q, K, V, O.reshape(B, -1, hd), L.reshape(B, -1), mask, R)
+    return O.reshape(B, -1, hd)[:, :N]
 
   @ staticmethod
   def backward(ctx, dO):
     Q, K, V, O, L, mask, R = ctx.saved_tensors
     B, N, hd = Q.size()
 
-    Bc = Config.Bc
     Br = Config.Br
-
+    Bc = Config.Bc
     # 切り上げ除算
     Tr = (N + Br - 1) // Br
     Tc = (N + Bc - 1) // Bc
+
+    if N < Config.Br and N % Config.Br != 0:
+      Tr = 1
+      Br = N
+
+    if N < Config.Bc and N % Config.Bc != 0:
+      Tc = 1
+      Bc = N
 
     D = torch.sum(dO * O, dim=2)
     D_list = D.reshape(B, Tr, 1, Br).to(Q.dtype)
@@ -144,4 +174,8 @@ class FlashAttentionFunction(torch.autograd.Function):
 
       dKj = dKj + softmax_scaling * dSij.transpose(-1, -2) @ Qi
 
-    return dQ_list.reshape(B, N, hd), dKj.reshape(B, N, hd), dVj.reshape(B, N, hd), None
+    return (dQ_list.reshape(B, -1, hd)[:, :N],
+            dKj.reshape(B, -1, hd)[:, :N],
+            dVj.reshape(B, -1, hd)[:, :N],
+            None
+            )
