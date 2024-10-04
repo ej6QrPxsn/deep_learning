@@ -45,7 +45,7 @@ class LLaMA(nn.Module):
       for j in range(len):
         # 要素がすべてpaddingなら-inf、そうでないなら0
         padding_mask[i, :, j] = torch.where(torch.all(x[i, j] == Config.pad_id), -float('inf'), 0)
-    return padding_mask
+    return padding_mask.reshape(-1, len)
 
 
 class Embedding(nn.Module):

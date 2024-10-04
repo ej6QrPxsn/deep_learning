@@ -44,9 +44,11 @@ class FlashAttentionFunction(torch.autograd.Function):
       K = torch.cat((K, bc_add), dim=1)
       V = torch.cat((V, bc_add), dim=1)
       try:
-        mask = torch.cat((mask, torch.zeros(1, Config.Bc - remainder, device=Q.device)), dim=1)
+        mask_add = torch.zeros(B, Config.Bc - remainder, device=Q.device)
+        mask = torch.cat((mask, mask_add), dim=1)
       except Exception:
-        print(N, Config.Bc, remainder, Config.Bc - remainder)
+        print(mask_add.shape)
+        print(mask.shape)
 
     Qi = Q.reshape(B, Tr, Br, hd)
     KT_list = K.reshape(B, Tc, 1, Bc, hd).transpose(-1, -2)
