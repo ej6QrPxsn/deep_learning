@@ -27,6 +27,12 @@ class LLaMA(nn.Module):
     init_linear(self.linear)
 
   def forward(self, x):
+    B, N = x.shape[0], x.shape[1]
+    if N > Config.Br and N % Config.Br != 0:
+      remainder = N % Config.Br
+      br_add = torch.zeros(B, Config.Br - remainder, *x.shape[2:], device=x.device)
+      x = torch.cat((x, br_add), dim=1)
+
     mask = self._create_masks(x)
     dec_out = self.decoder(x, mask)
     norm_out = self.rms_norm(dec_out)
@@ -45,6 +51,7 @@ class LLaMA(nn.Module):
       for j in range(len):
         # 要素がすべてpaddingなら-inf、そうでないなら0
         padding_mask[i, :, j] = torch.where(torch.all(x[i, j] == Config.pad_id), -float('inf'), 0)
+
     return padding_mask.reshape(-1, len)
 
 

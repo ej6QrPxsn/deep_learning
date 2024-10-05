@@ -33,23 +33,6 @@ class FlashAttentionFunction(torch.autograd.Function):
       Tc = 1
       Bc = N
 
-    if N > Config.Br and N % Config.Br != 0:
-      remainder = N % Config.Br
-      br_add = torch.zeros(B, Config.Br - remainder, hd, device=Q.device)
-      Q = torch.cat((Q, br_add), dim=1)
-
-    if N > Config.Bc and N % Config.Bc != 0:
-      remainder = N % Config.Bc
-      bc_add = torch.zeros(B, Config.Bc - remainder, hd, device=Q.device)
-      K = torch.cat((K, bc_add), dim=1)
-      V = torch.cat((V, bc_add), dim=1)
-      try:
-        mask_add = torch.zeros(B, Config.Bc - remainder, device=Q.device)
-        mask = torch.cat((mask, mask_add), dim=1)
-      except Exception:
-        print(mask_add.shape)
-        print(mask.shape)
-
     Qi = Q.reshape(B, Tr, Br, hd)
     KT_list = K.reshape(B, Tc, 1, Bc, hd).transpose(-1, -2)
     V_list = V.reshape(B, Tc, 1, Bc, hd)
