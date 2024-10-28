@@ -35,7 +35,7 @@ class Config(NamedTuple):
   pre_train_model_path = "pre_train_model.pt"
   model_path = "model.pt"
 
-  Br = 50
-  Bc = 50
+  Br = 80
+  Bc = 80
   softmax_scaling = 1 / math.sqrt(d_model)
   dropout_probabilty = 0.1
