@@ -8,7 +8,7 @@ class Config(NamedTuple):
 
   pad_id = 0
 
-  d_model = 128
+  d_model = 512
   d_ff = math.ceil(2 / 3 * 4 * d_model)
   num_layer = 16
 
